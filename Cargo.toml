@@ -1,6 +1,6 @@
 [package]
 name = "pm4py-rs"
-version = "0.3.0"
+version = "2026.3.28"
 edition = "2021"
 rust-version = "1.85"
 # Minimum Supported Rust Version: 1.85.0 (required for a2a-rs edition 2024)
