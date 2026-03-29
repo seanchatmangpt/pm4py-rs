@@ -28,6 +28,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install Python and pm4py
+        run: |
+          pip install pm4py
+
       - name: Check Cargo.toml version matches tag
         run: |
           VERSION=$(cargo pkgid | cut -d'#' -f2 | cut -d':' -f2)
