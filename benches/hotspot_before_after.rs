@@ -14,13 +14,13 @@
 
 use chrono::Utc;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use pm4py_rust::discovery::variants::Variant;
-use pm4py_rust::log::{Event, EventLog, Trace};
-use pm4py_rust::models::{Arc, PetriNet, Place, Transition};
-use pm4py_rust::optimization::cache_aware::{
+use pm4py::discovery::variants::Variant;
+use pm4py::log::{Event, EventLog, Trace};
+use pm4py::models::{Arc, PetriNet, Place, Transition};
+use pm4py::optimization::cache_aware::{
     OptimizedPetriNet, OptimizedVariantAggregator, ParallelActivityDetector,
 };
-use pm4py_rust::optimization::hotspot_elimination::{
+use pm4py::optimization::hotspot_elimination::{
     CalculationMemoizer, OptimizedReachabilityChecker, OptimizedVariantAnalyzer,
     SingleScanAggregator,
 };
