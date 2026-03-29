@@ -1,0 +1,104 @@
+//! Integration tests for Python bindings
+//! These tests verify that the Rust components work correctly
+//! when called from the Python layer
+
+#[cfg(feature = "python")]
+mod python_bindings_tests {
+    use pm4py::log::{Event, EventLog, Trace};
+    use pm4py::discovery::AlphaMiner;
+    use pm4py::conformance::FootprintsConformanceChecker;
+    use chrono::Utc;
+
+    fn create_simple_log() -> EventLog {
+        let mut log = EventLog::new();
+
+        // Create 5 simple traces: A -> B -> C
+        for i in 0..5 {
+            let mut trace = Trace::new(format!("case_{}", i));
+
+            let ts_a = Utc::now();
+            trace.events.push(Event::new("A", ts_a));
+
+            let ts_b = ts_a + chrono::Duration::hours(1);
+            trace.events.push(Event::new("B", ts_b));
+
+            let ts_c = ts_b + chrono::Duration::hours(1);
+            trace.events.push(Event::new("C", ts_c));
+
+            log.traces.push(trace);
+        }
+
+        log
+    }
+
+    #[test]
+    fn test_event_log_creation() {
+        let log = create_simple_log();
+        assert_eq!(log.traces.len(), 5);
+        for trace in &log.traces {
+            assert_eq!(trace.events.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_alpha_miner_basic() {
+        let log = create_simple_log();
+        let miner = AlphaMiner::new();
+        let net = miner.discover(&log);
+
+        // Verify structure
+        assert!(!net.places.is_empty());
+        assert!(!net.transitions.is_empty());
+        assert!(!net.arcs.is_empty());
+    }
+
+    #[test]
+    fn test_log_statistics() {
+        let log = create_simple_log();
+
+        // Test basic properties accessible from Python
+        assert_eq!(log.traces.len(), 5);
+
+        // Verify all traces have 3 events
+        let total_events = log.traces.iter().map(|t| t.events.len()).sum::<usize>();
+        assert_eq!(total_events, 15);
+
+        // Calculate variants
+        let mut variants = std::collections::HashMap::new();
+        for trace in &log.traces {
+            let key: Vec<_> = trace.events.iter().map(|e| e.activity.clone()).collect();
+            *variants.entry(key).or_insert(0) += 1;
+        }
+        assert_eq!(variants.len(), 1); // All traces are identical
+    }
+
+    #[test]
+    fn test_event_attributes() {
+        let mut log = EventLog::new();
+        let mut trace = Trace::new("case_1");
+
+        let ts = Utc::now();
+        let event = Event::new("A", ts)
+            .with_resource("resource_1")
+            .with_attribute("cost", "100");
+
+        trace.events.push(event);
+        log.traces.push(trace);
+
+        // Verify event properties
+        let event = &log.traces[0].events[0];
+        assert_eq!(event.activity, "A");
+        assert_eq!(event.resource, Some("resource_1".to_string()));
+        assert_eq!(event.attributes.get("cost"), Some(&"100".to_string()));
+    }
+}
+
+#[cfg(not(feature = "python"))]
+mod python_bindings_tests {
+    #[test]
+    fn test_python_feature_disabled() {
+        // This test runs when python feature is disabled
+        // The actual Python binding tests won't compile without the feature
+        assert!(true);
+    }
+}

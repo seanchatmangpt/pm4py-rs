@@ -1,0 +1,213 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pm4py-api-ingress
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "false"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+spec:
+  # TLS configuration
+  tls:
+    - secretName: pm4py-api-tls
+      hosts:
+        - pm4py-api.example.com
+        - api.pm4py.example.com
+        - discovery.pm4py.example.com
+        - conformance.pm4py.example.com
+
+  # Ingress class
+  ingressClassName: nginx
+
+  # HTTP routing rules
+  rules:
+    # Main API endpoint
+    - host: pm4py-api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  number: 80
+
+    # API endpoints with path-based routing
+    - host: api.pm4py.example.com
+      http:
+        paths:
+          # Discovery endpoint
+          - path: /api/discovery
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http
+
+          # Conformance endpoint
+          - path: /api/conformance
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http
+
+          # Statistics endpoint
+          - path: /api/statistics
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http
+
+          # Health endpoint
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http
+
+          # Readiness endpoint
+          - path: /ready
+            pathType: Exact
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http
+
+          # Metrics endpoint
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http
+
+    # Subdomain-based routing
+    - host: discovery.pm4py.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  number: 80
+
+    - host: conformance.pm4py.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  number: 80
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pm4py-api-tls-cert
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+spec:
+  secretName: pm4py-api-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - pm4py-api.example.com
+    - api.pm4py.example.com
+    - discovery.pm4py.example.com
+    - conformance.pm4py.example.com
+  duration: 2160h  # 90 days
+  renewBefore: 720h  # 30 days
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pm4py-api-internal-ingress
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    internal: "true"
+  annotations:
+    description: "Internal-only ingress for private API endpoints"
+spec:
+  ingressClassName: nginx-internal
+
+  rules:
+    - host: pm4py-api-internal.local
+      http:
+        paths:
+          - path: /api/internal
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api-internal
+                port:
+                  number: 8080
+
+          - path: /debug
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api-internal
+                port:
+                  number: 8080
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pm4py-api-rate-limit
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    rate-limit: "true"
+  annotations:
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+spec:
+  ingressClassName: nginx
+
+  rules:
+    - host: api-ratelimit.pm4py.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pm4py-api
+                port:
+                  name: http

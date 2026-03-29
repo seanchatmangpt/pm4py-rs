@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pm4py-prod-quota
+  namespace: pm4py-prod
+  labels:
+    app: pm4py
+    namespace: pm4py-prod
+  annotations:
+    description: "Resource quotas for pm4py-prod namespace"
+spec:
+  # Hard limits on resource usage
+  hard:
+    # Compute resources
+    cpu: "20"  # 20 CPU cores max across all pods
+    memory: "40Gi"  # 40 GiB max across all pods
+    limits.cpu: "20"
+    limits.memory: "40Gi"
+    requests.cpu: "10"
+    requests.memory: "20Gi"
+
+    # Pod count limits
+    pods: "50"  # Max 50 pods in namespace
+    persistentvolumeclaims: "10"
+
+    # Storage
+    requests.storage: "100Gi"
+    limits.storage: "200Gi"
+
+  # Scope: only apply to pods with specific labels
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - high
+          - medium
+          - low
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pm4py-prod-strict-quota
+  namespace: pm4py-prod
+  labels:
+    namespace: pm4py-prod
+    variant: strict
+  annotations:
+    description: "Strict resource quotas for production workloads"
+spec:
+  hard:
+    cpu: "15"
+    memory: "30Gi"
+    limits.cpu: "15"
+    limits.memory: "30Gi"
+    requests.cpu: "8"
+    requests.memory: "16Gi"
+    pods: "30"
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: pm4py-prod-limits
+  namespace: pm4py-prod
+  labels:
+    namespace: pm4py-prod
+  annotations:
+    description: "Per-pod and per-container resource limits"
+spec:
+  limits:
+    # Container limits
+    - type: Container
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      max:
+        cpu: "4"
+        memory: "4Gi"
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "250m"
+        memory: "256Mi"
+      maxLimitRequestRatio:
+        cpu: "4"
+        memory: "2"
+
+    # Pod limits
+    - type: Pod
+      min:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "4"
+        memory: "4Gi"
+
+    # PVC limits
+    - type: PersistentVolumeClaim
+      min:
+        storage: "1Gi"
+      max:
+        storage: "100Gi"
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pm4py-prod-priority-high
+  namespace: pm4py-prod
+  labels:
+    priority: high
+  annotations:
+    description: "Resource quota for high-priority workloads"
+spec:
+  hard:
+    cpu: "10"
+    memory: "20Gi"
+    pods: "20"
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - system-cluster-critical
+          - system-node-critical
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: pm4py-prod-priority-low
+  namespace: pm4py-prod
+  labels:
+    priority: low
+  annotations:
+    description: "Resource quota for low-priority workloads"
+spec:
+  hard:
+    cpu: "5"
+    memory: "10Gi"
+    pods: "10"
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - low

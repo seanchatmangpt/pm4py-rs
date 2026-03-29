@@ -1,0 +1,104 @@
+/// XXE (XML External Entity) vulnerability tests for XES parser
+/// Ensures DTD entity expansion is disabled to prevent XXE attacks
+use pm4py::io::xes::XESReader;
+use std::io::Write;
+use tempfile::NamedTempFile;
+
+/// Test 1: Billion Laughs Attack (Entity Expansion DoS)
+/// This test attempts to parse an XES file with nested entity definitions
+/// that would cause exponential memory consumption if DTD processing were enabled.
+#[test]
+fn test_xxe_entity_expansion_blocked() {
+    let xxe_payload = r#"<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<log xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="&lol4;"/>
+    <event>
+      <string key="concept:name" value="A"/>
+    </event>
+  </trace>
+</log>"#;
+
+    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+    temp_file
+        .write_all(xxe_payload.as_bytes())
+        .expect("Failed to write to temp file");
+
+    let reader = XESReader::new();
+    // Should NOT panic or consume excessive memory
+    // DTD should be skipped/ignored, and parsing should complete safely
+    let result = reader.read(temp_file.path());
+
+    // The parser should either succeed with empty/minimal content
+    // or fail gracefully with a parsing error (not a panic or timeout)
+    match result {
+        Ok(log) => {
+            // If parsing succeeds, it should have parsed the structure
+            // without expanding the entities
+            // Verify the log was parsed successfully
+            // (quick-xml handles XXE by not expanding entities)
+            let _ = log;
+        }
+        Err(e) => {
+            // A graceful error is acceptable
+            eprintln!("XXE entity expansion blocked with error: {:?}", e);
+        }
+    }
+}
+
+/// Test 2: External Entity Reference Attack
+/// This test attempts to read a file from the filesystem using XXE
+/// by declaring an external entity that references a local file.
+#[test]
+fn test_external_entity_reference_blocked() {
+    let xxe_payload = r#"<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ELEMENT foo ANY>
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<log xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="&xxe;"/>
+    <event>
+      <string key="concept:name" value="A"/>
+    </event>
+  </trace>
+</log>"#;
+
+    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+    temp_file
+        .write_all(xxe_payload.as_bytes())
+        .expect("Failed to write to temp file");
+
+    let reader = XESReader::new();
+    // Should NOT attempt to read external files or follow entity references
+    let result = reader.read(temp_file.path());
+
+    match result {
+        Ok(log) => {
+            // If parsing succeeds, verify no file content was read
+            // The trace ID should NOT contain /etc/passwd contents
+            if !log.traces.is_empty() {
+                let trace_id = &log.traces[0].id;
+                assert!(
+                    !trace_id.contains("root:"),
+                    "External file content should not be loaded"
+                );
+                assert!(
+                    !trace_id.contains("/bin/bash"),
+                    "External file content should not be loaded"
+                );
+            }
+        }
+        Err(e) => {
+            // A graceful error is acceptable (preferred for security)
+            eprintln!("External entity reference blocked with error: {:?}", e);
+        }
+    }
+}

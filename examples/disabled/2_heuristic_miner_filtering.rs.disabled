@@ -1,0 +1,213 @@
+//! Heuristic Miner with Filtering Example
+//!
+//! This example demonstrates Heuristic Miner, which is more robust than Alpha Miner
+//! and can handle noise and infrequent paths. We also show how to filter event logs
+//! to focus on the most relevant behavior.
+//!
+//! Run: cargo run --example 2_heuristic_miner_filtering
+
+use chrono::{Duration, Utc};
+use pm4py::{
+    discovery::HeuristicMiner,
+    io::CSVReader,
+    log::{AdvancedFilter, EventLog, Trace},
+};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Heuristic Miner with Filtering Example ===\n");
+
+    // Step 1: Create a realistic event log with some noise
+    println!("Step 1: Creating event log with realistic data...");
+    let log = create_realistic_log();
+
+    println!("✓ Created log with {} traces", log.traces.len());
+    println!("  Total events: {}", log.total_events());
+    println!("  Unique activities: {}", log.unique_activities().len());
+    println!();
+
+    // Step 2: Analyze variants before filtering
+    println!("Step 2: Analyzing process variants...");
+    use pm4py::discovery::VariantAnalysis;
+    let variants = VariantAnalysis::analyze(&log);
+
+    println!("✓ Found {} unique variants", variants.len());
+    println!("  Top 3 variants by frequency:");
+    for (i, variant) in variants.iter().take(3).enumerate() {
+        let pct = (variant.count as f64 / log.traces.len() as f64) * 100.0;
+        println!("    {}. {} ({:.1}%) - {} cases",
+            i + 1,
+            variant.signature,
+            pct,
+            variant.count
+        );
+    }
+    println!();
+
+    // Step 3: Filter to keep only top 80% of variants
+    println!("Step 3: Filtering log to top 80% of variants...");
+    let filtered_log = log.filter_variants_top_k(0.8);
+
+    println!("✓ Filtered to {} traces ({:.0}% of original)",
+        filtered_log.traces.len(),
+        (filtered_log.traces.len() as f64 / log.traces.len() as f64) * 100.0
+    );
+    println!();
+
+    // Step 4: Apply performance filter (remove extremely long cases)
+    println!("Step 4: Applying performance filter...");
+    let performance_filtered = filtered_log.filter_case_size(5, 50);
+
+    println!("✓ Filtered to {} traces (case size: 5-50 events)",
+        performance_filtered.traces.len()
+    );
+    println!();
+
+    // Step 5: Discover model with Heuristic Miner
+    println!("Step 5: Discovering process model with Heuristic Miner...");
+    let miner = HeuristicMiner::new()
+        .with_dependency_threshold(0.9)  // Strong dependencies only
+        .with_and_threshold(0.1)         // Low threshold for AND splits
+        .with_min_occurrences(2);        // Ignore rare patterns
+
+    let petri_net = miner.discover(&performance_filtered);
+
+    println!("✓ Process model discovered");
+    println!("  Places: {}", petri_net.places.len());
+    println!("  Transitions: {}", petri_net.transitions.len());
+    println!("  Arcs: {}", petri_net.arcs.len());
+    println!();
+
+    // Step 6: Display discovered dependencies
+    println!("Step 6: Key control-flow dependencies:");
+    let dfg = pm4py::discovery::directly_follows_graph(&performance_filtered);
+    let mut dependencies: Vec<_> = dfg.edges.iter().collect();
+    dependencies.sort_by(|a, b| b.1.cmp(a.1));  // Sort by frequency
+
+    for (i, ((from_act, to_act), freq)) in dependencies.iter().take(10).enumerate() {
+        println!("    {}. {} → {} ({} occurrences)",
+            i + 1, from_act, to_act, freq
+        );
+    }
+    println!();
+
+    // Step 7: Performance analysis
+    println!("Step 7: Performance analysis...");
+    let perf_dfg = pm4py::discovery::discover_performance_dfg(&performance_filtered);
+
+    println!("  Average cycle times (top 5 paths):");
+    let mut paths: Vec<_> = perf_dfg.edges.iter().collect();
+    paths.sort_by(|a, b| b.1.avg_duration.partial_cmp(&a.1.avg_duration).unwrap());
+
+    for (i, ((from_act, to_act), metrics)) in paths.iter().take(5).enumerate() {
+        println!("    {}. {} → {}",
+            i + 1, from_act, to_act
+        );
+        println!("       Mean: {:.2}s, Min: {:.2}s, Max: {:.2}s",
+            metrics.avg_duration.num_seconds() as f64,
+            metrics.min_duration.num_seconds() as f64,
+            metrics.max_duration.num_seconds() as f64
+        );
+    }
+
+    println!("\n=== Discovery complete ===");
+    Ok(())
+}
+
+/// Create a realistic event log with:
+/// - Multiple variants (happy path, exceptions, rework)
+/// - Noise (rare events, outliers)
+/// - Realistic timestamps
+fn create_realistic_log() -> EventLog {
+    use pm4py::{Event, Trace};
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    // Variant 1: Happy path (60% of cases)
+    for i in 0..60 {
+        let mut trace = Trace::new(format!("case-{:03}", i));
+        let mut time = base_time + Duration::seconds(i as i64 * 100);
+
+        trace.add_event(Event::new("Register Request", time).with_resource("System"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("Examine Thoroughly", time).with_resource("Clerk"));
+        time = time + Duration::hours(24);
+        trace.add_event(Event::new("Check Ticket", time).with_resource("Supervisor"));
+        time = time + Duration::hours(4);
+        trace.add_event(Event::new("Decide", time).with_resource("Manager"));
+        time = time + Duration::hours(2);
+        trace.add_event(Event::new("Pay Compensation", time).with_resource("Finance"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("End", time).with_resource("System"));
+
+        log.add_trace(trace);
+    }
+
+    // Variant 2: Additional information needed (25% of cases)
+    for i in 60..85 {
+        let mut trace = Trace::new(format!("case-{:03}", i));
+        let mut time = base_time + Duration::seconds(i as i64 * 100);
+
+        trace.add_event(Event::new("Register Request", time).with_resource("System"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("Examine Thoroughly", time).with_resource("Clerk"));
+        time = time + Duration::hours(2);
+        trace.add_event(Event::new("Additional Info", time).with_resource("Clerk"));
+        time = time + Duration::hours(24);
+        trace.add_event(Event::new("Check Ticket", time).with_resource("Supervisor"));
+        time = time + Duration::hours(4);
+        trace.add_event(Event::new("Decide", time).with_resource("Manager"));
+        time = time + Duration::hours(2);
+        trace.add_event(Event::new("Pay Compensation", time).with_resource("Finance"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("End", time).with_resource("System"));
+
+        log.add_trace(trace);
+    }
+
+    // Variant 3: Rejected (10% of cases)
+    for i in 85..95 {
+        let mut trace = Trace::new(format!("case-{:03}", i));
+        let mut time = base_time + Duration::seconds(i as i64 * 100);
+
+        trace.add_event(Event::new("Register Request", time).with_resource("System"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("Examine Thoroughly", time).with_resource("Clerk"));
+        time = time + Duration::hours(24);
+        trace.add_event(Event::new("Check Ticket", time).with_resource("Supervisor"));
+        time = time + Duration::hours(4);
+        trace.add_event(Event::new("Decide", time).with_resource("Manager"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("Reject Request", time).with_resource("Manager"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("End", time).with_resource("System"));
+
+        log.add_trace(trace);
+    }
+
+    // Variant 4: Noise - rare rework loop (5% of cases)
+    for i in 95..100 {
+        let mut trace = Trace::new(format!("case-{:03}", i));
+        let mut time = base_time + Duration::seconds(i as i64 * 100);
+
+        trace.add_event(Event::new("Register Request", time).with_resource("System"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("Examine Thoroughly", time).with_resource("Clerk"));
+        time = time + Duration::hours(2);
+        trace.add_event(Event::new("Rework", time).with_resource("Clerk"));  // Rework
+        time = time + Duration::hours(2);
+        trace.add_event(Event::new("Examine Thoroughly", time).with_resource("Clerk"));
+        time = time + Duration::hours(24);
+        trace.add_event(Event::new("Check Ticket", time).with_resource("Supervisor"));
+        time = time + Duration::hours(4);
+        trace.add_event(Event::new("Decide", time).with_resource("Manager"));
+        time = time + Duration::hours(2);
+        trace.add_event(Event::new("Pay Compensation", time).with_resource("Finance"));
+        time = time + Duration::hours(1);
+        trace.add_event(Event::new("End", time).with_resource("System"));
+
+        log.add_trace(trace);
+    }
+
+    log
+}

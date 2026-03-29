@@ -1,0 +1,26 @@
+case_id,activity,timestamp,resource
+case-1,Register Request,2016-01-01T09:00:00Z,Pete
+case-1,Examine Thoroughly,2016-01-01T10:00:00Z,Pete
+case-1,Check Ticket,2016-01-02T09:00:00Z,Sara
+case-1,Decide,2016-01-02T10:00:00Z,Mike
+case-1,Reject Request,2016-01-02T11:00:00Z,Mike
+case-2,Register Request,2016-01-03T09:00:00Z,Mike
+case-2,Check Ticket,2016-01-03T10:00:00Z,Sara
+case-2,Examine Thoroughly,2016-01-03T11:00:00Z,Pete
+case-2,Decide,2016-01-04T09:00:00Z,Sara
+case-2,Pay Compensation,2016-01-04T10:00:00Z,Ellen
+case-3,Register Request,2016-01-05T09:00:00Z,Pete
+case-3,Examine Thoroughly,2016-01-05T10:00:00Z,Pete
+case-3,Check Ticket,2016-01-06T09:00:00Z,Sara
+case-3,Decide,2016-01-06T10:00:00Z,Mike
+case-3,Pay Compensation,2016-01-06T11:00:00Z,Ellen
+case-4,Register Request,2016-01-07T09:00:00Z,Mike
+case-4,Examine Thoroughly,2016-01-07T10:00:00Z,Mike
+case-4,Check Ticket,2016-01-08T09:00:00Z,Sara
+case-4,Decide,2016-01-08T10:00:00Z,Mike
+case-4,Pay Compensation,2016-01-08T11:00:00Z,Ellen
+case-5,Register Request,2016-01-09T09:00:00Z,Pete
+case-5,Examine Thoroughly,2016-01-09T10:00:00Z,Pete
+case-5,Check Ticket,2016-01-10T09:00:00Z,Sara
+case-5,Decide,2016-01-10T10:00:00Z,Mike
+case-5,Reject Request,2016-01-10T11:00:00Z,Mike

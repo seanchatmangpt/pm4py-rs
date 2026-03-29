@@ -1,0 +1,492 @@
+/// Variant Discovery and Filtering Tests
+///
+/// These tests validate variant discovery (identifying distinct activity sequences)
+/// and filtering capabilities for process mining analysis.
+///
+/// Test Categories:
+/// - Variant Discovery: Identify all distinct activity sequences in logs
+/// - Frequency-based Filtering: Filter variants by minimum support threshold
+/// - Activity-based Filtering: Filter variants containing specific activities
+/// - Coverage Analysis: Calculate cumulative coverage percentages
+/// - Anomaly Detection: Identify rare variants as anomalies
+
+#[cfg(test)]
+mod variant_filtering {
+    use pm4py::{EventLog, Trace, Event};
+    use std::collections::HashMap;
+    use chrono::Utc;
+
+    /// Helper: Extract variant (activity sequence) from a trace
+    fn get_variant(trace: &Trace) -> Vec<String> {
+        trace.events.iter().map(|e| e.activity.clone()).collect()
+    }
+
+    /// Helper: Get variant as comma-separated string for grouping
+    #[allow(dead_code)]
+    fn variant_to_string(variant: &[String]) -> String {
+        variant.join(",")
+    }
+
+    /// Helper: Discover all unique variants and their frequencies
+    fn discover_variants(log: &EventLog) -> HashMap<Vec<String>, usize> {
+        let mut variants = HashMap::new();
+        for trace in &log.traces {
+            let variant = get_variant(trace);
+            *variants.entry(variant).or_insert(0) += 1;
+        }
+        variants
+    }
+
+    /// Helper: Filter variants by minimum support percentage
+    fn filter_by_support(
+        variants: &HashMap<Vec<String>, usize>,
+        min_support_percent: f64,
+    ) -> HashMap<Vec<String>, usize> {
+        let total_traces: usize = variants.values().sum();
+        let min_count = ((total_traces as f64) * (min_support_percent / 100.0)).ceil() as usize;
+
+        variants
+            .iter()
+            .filter(|(_, count)| **count >= min_count)
+            .map(|(v, c)| (v.clone(), *c))
+            .collect()
+    }
+
+    /// Helper: Filter variants that contain a required activity
+    fn filter_by_activity(
+        variants: &HashMap<Vec<String>, usize>,
+        required_activity: &str,
+    ) -> HashMap<Vec<String>, usize> {
+        variants
+            .iter()
+            .filter(|(variant, _)| variant.contains(&required_activity.to_string()))
+            .map(|(v, c)| (v.clone(), *c))
+            .collect()
+    }
+
+    /// Helper: Calculate cumulative coverage percentage for sorted variants
+    fn calculate_coverage_percentages(
+        variants: &HashMap<Vec<String>, usize>,
+    ) -> Vec<(Vec<String>, f64, f64)> {
+        let total_traces: usize = variants.values().sum();
+
+        // Sort variants by frequency (descending)
+        let mut sorted: Vec<_> = variants.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+
+        let mut cumulative = 0;
+        let mut result = Vec::new();
+
+        for (variant, count) in sorted {
+            cumulative += count;
+            let individual_pct = (*count as f64) / (total_traces as f64) * 100.0;
+            let cumulative_pct = (cumulative as f64) / (total_traces as f64) * 100.0;
+            result.push((variant.clone(), individual_pct, cumulative_pct));
+        }
+
+        result
+    }
+
+    /// Helper: Identify anomalies (variants with support below threshold)
+    fn detect_anomalies(
+        variants: &HashMap<Vec<String>, usize>,
+        anomaly_threshold_percent: f64,
+    ) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+        let total_traces: usize = variants.values().sum();
+        let threshold_count = ((total_traces as f64) * (anomaly_threshold_percent / 100.0)) as usize;
+
+        let mut normal = Vec::new();
+        let mut anomalies = Vec::new();
+
+        for (variant, count) in variants.iter() {
+            if *count < threshold_count {
+                anomalies.push(variant.clone());
+            } else {
+                normal.push(variant.clone());
+            }
+        }
+
+        (normal, anomalies)
+    }
+
+    /// TEST 1: Variant Discovery
+    ///
+    /// Identify all distinct activity sequences in logs
+    /// Input: 10 traces with 3 distinct paths
+    /// Expected: 3 variants with frequencies [6, 3, 1]
+    #[test]
+    fn test_variant_discovery() {
+        // Create test log with 10 traces and 3 distinct variants
+        let mut log = EventLog::new();
+        let now = Utc::now();
+
+        // Variant 1: account_created -> verification_initiated -> verification_completed -> account_activated (6 traces)
+        for i in 1..=6 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("verification_initiated", now));
+            trace.add_event(Event::new("verification_completed", now));
+            trace.add_event(Event::new("account_activated", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 2: account_created -> verification_initiated -> account_activated (3 traces)
+        for i in 7..=9 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("verification_initiated", now));
+            trace.add_event(Event::new("account_activated", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 3: account_created -> account_activated (1 trace)
+        {
+            let mut trace = Trace::new("CASE_010");
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("account_activated", now));
+            log.add_trace(trace);
+        }
+
+        // Discover variants
+        let variants = discover_variants(&log);
+
+        // Verify: 3 distinct variants
+        assert_eq!(
+            variants.len(),
+            3,
+            "Expected 3 distinct variants, got {}",
+            variants.len()
+        );
+
+        // Verify: Frequencies are correct [6, 3, 1]
+        let mut frequencies: Vec<usize> = variants.values().copied().collect();
+        frequencies.sort_by(|a, b| b.cmp(a)); // Sort descending
+
+        assert_eq!(
+            frequencies,
+            vec![6, 3, 1],
+            "Expected frequencies [6, 3, 1], got {:?}",
+            frequencies
+        );
+
+        // Verify: Total traces = 10
+        let total: usize = variants.values().sum();
+        assert_eq!(total, 10, "Expected 10 total traces, got {}", total);
+    }
+
+    /// TEST 2: Variant Filtering by Frequency
+    ///
+    /// Filter variants by minimum frequency threshold
+    /// Input: 5 variants, min_support=30%
+    /// Expected: Only variants covering ≥30% of cases
+    #[test]
+    fn test_variant_filtering_by_frequency() {
+        // Create test log with 5 variants of different frequencies
+        let mut log = EventLog::new();
+        let now = Utc::now();
+
+        // Variant 1: 40% (4 traces)
+        for i in 1..=4 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("a", now));
+            trace.add_event(Event::new("b", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 2: 30% (3 traces)
+        for i in 5..=7 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("a", now));
+            trace.add_event(Event::new("c", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 3: 15% (1.5 traces -> 2 traces)
+        {
+            let mut trace = Trace::new("CASE_008");
+            trace.add_event(Event::new("a", now));
+            trace.add_event(Event::new("d", now));
+            log.add_trace(trace);
+        }
+        {
+            let mut trace = Trace::new("CASE_009");
+            trace.add_event(Event::new("b", now));
+            trace.add_event(Event::new("c", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 4: 10% (1 trace)
+        {
+            let mut trace = Trace::new("CASE_010");
+            trace.add_event(Event::new("b", now));
+            trace.add_event(Event::new("d", now));
+            log.add_trace(trace);
+        }
+
+        // Discover all variants
+        let all_variants = discover_variants(&log);
+        assert_eq!(all_variants.len(), 5, "Expected 5 variants before filtering");
+
+        // Filter by 30% minimum support
+        let filtered = filter_by_support(&all_variants, 30.0);
+
+        // Verify: Only variants with ≥30% support remain
+        assert_eq!(
+            filtered.len(),
+            2,
+            "Expected 2 variants with ≥30% support, got {}",
+            filtered.len()
+        );
+
+        // Verify: Remaining variants have ≥30% coverage
+        let total_filtered: usize = filtered.values().sum();
+        assert_eq!(total_filtered, 7, "Expected 7 traces in filtered set, got {}", total_filtered);
+        assert!(
+            total_filtered as f64 / log.traces.len() as f64 >= 0.30,
+            "Expected ≥30% coverage"
+        );
+    }
+
+    /// TEST 3: Variant Filtering by Required Activity
+    ///
+    /// Filter variants that contain a required activity
+    /// Input: Multiple variants, must contain "account_activated"
+    /// Expected: Only variants with that activity
+    #[test]
+    fn test_variant_filtering_by_activity() {
+        // Create test log with mixed activities
+        let mut log = EventLog::new();
+        let now = Utc::now();
+
+        // Variant 1: Contains account_activated (3 traces)
+        for i in 1..=3 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("account_activated", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 2: Contains account_activated (2 traces)
+        for i in 4..=5 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("verification_initiated", now));
+            trace.add_event(Event::new("account_activated", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 3: Does NOT contain account_activated (2 traces)
+        for i in 6..=7 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("verification_initiated", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 4: Does NOT contain account_activated (1 trace)
+        {
+            let mut trace = Trace::new("CASE_008");
+            trace.add_event(Event::new("account_deleted", now));
+            log.add_trace(trace);
+        }
+
+        // Discover all variants
+        let all_variants = discover_variants(&log);
+        assert_eq!(all_variants.len(), 4, "Expected 4 variants before filtering");
+
+        // Filter by required activity: "account_activated"
+        let filtered = filter_by_activity(&all_variants, "account_activated");
+
+        // Verify: Only 2 variants contain account_activated
+        assert_eq!(
+            filtered.len(),
+            2,
+            "Expected 2 variants with 'account_activated', got {}",
+            filtered.len()
+        );
+
+        // Verify: All remaining variants contain the required activity
+        for variant in filtered.keys() {
+            assert!(
+                variant.contains(&"account_activated".to_string()),
+                "Filtered variant should contain 'account_activated'"
+            );
+        }
+
+        // Verify: Total traces in filtered set = 5 (3 + 2)
+        let total_filtered: usize = filtered.values().sum();
+        assert_eq!(
+            total_filtered, 5,
+            "Expected 5 traces with 'account_activated', got {}",
+            total_filtered
+        );
+    }
+
+    /// TEST 4: Variant Coverage Percentage (80/20 Rule)
+    ///
+    /// Calculate cumulative coverage by variant
+    /// Expected: Show how many variants are needed to cover 80% of cases
+    #[test]
+    fn test_variant_coverage_percentage() {
+        // Create test log with variants showing Pareto distribution
+        let mut log = EventLog::new();
+        let now = Utc::now();
+
+        // Variant 1: 60% (60 traces)
+        for i in 1..=60 {
+            let mut trace = Trace::new(format!("CASE_{:04}", i));
+            trace.add_event(Event::new("a", now));
+            trace.add_event(Event::new("b", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 2: 20% (20 traces)
+        for i in 61..=80 {
+            let mut trace = Trace::new(format!("CASE_{:04}", i));
+            trace.add_event(Event::new("a", now));
+            trace.add_event(Event::new("c", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 3: 10% (10 traces)
+        for i in 81..=90 {
+            let mut trace = Trace::new(format!("CASE_{:04}", i));
+            trace.add_event(Event::new("b", now));
+            trace.add_event(Event::new("c", now));
+            log.add_trace(trace);
+        }
+
+        // Variant 4: 10% (10 traces)
+        for i in 91..=100 {
+            let mut trace = Trace::new(format!("CASE_{:04}", i));
+            trace.add_event(Event::new("a", now));
+            trace.add_event(Event::new("d", now));
+            log.add_trace(trace);
+        }
+
+        // Discover variants
+        let variants = discover_variants(&log);
+        assert_eq!(variants.len(), 4, "Expected 4 variants");
+
+        // Calculate coverage percentages
+        let coverage = calculate_coverage_percentages(&variants);
+
+        // Verify: Coverage list is sorted by frequency (descending)
+        for i in 0..coverage.len() - 1 {
+            assert!(
+                coverage[i].1 >= coverage[i + 1].1,
+                "Coverage should be sorted by individual percentage descending"
+            );
+        }
+
+        // Verify: Cumulative coverage is monotonically increasing
+        for i in 0..coverage.len() - 1 {
+            assert!(
+                coverage[i].2 <= coverage[i + 1].2,
+                "Cumulative coverage should be increasing"
+            );
+        }
+
+        // Verify: Final cumulative coverage = 100%
+        assert!(
+            (coverage.last().unwrap().2 - 100.0).abs() < 0.01,
+            "Final cumulative coverage should be 100%"
+        );
+
+        // Verify: Top variant covers 60%
+        assert!(
+            (coverage[0].1 - 60.0).abs() < 0.01,
+            "Top variant should cover 60%"
+        );
+
+        // Verify: Top 2 variants cover 80% (demonstrating 80/20 rule)
+        assert!(
+            (coverage[1].2 - 80.0).abs() < 0.01,
+            "Top 2 variants should cover 80%"
+        );
+    }
+
+    /// TEST 5: Variant Anomaly Detection
+    ///
+    /// Identify rare variants as anomalies
+    /// Input: 100 traces, 95 same variant, 5 different
+    /// Expected: Flag 5% anomalies
+    #[test]
+    fn test_variant_anomaly_detection() {
+        // Create test log with dominant variant (normal) and rare variants (anomalies)
+        let mut log = EventLog::new();
+        let now = Utc::now();
+
+        // Normal variant: 95 traces (95%)
+        for i in 1..=95 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("verification_initiated", now));
+            trace.add_event(Event::new("verification_completed", now));
+            trace.add_event(Event::new("account_activated", now));
+            log.add_trace(trace);
+        }
+
+        // Anomaly 1: 3 traces (3%)
+        for i in 96..=98 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("account_closed", now));
+            log.add_trace(trace);
+        }
+
+        // Anomaly 2: 2 traces (2%)
+        for i in 99..=100 {
+            let mut trace = Trace::new(format!("CASE_{:03}", i));
+            trace.add_event(Event::new("account_created", now));
+            trace.add_event(Event::new("suspended", now));
+            log.add_trace(trace);
+        }
+
+        // Discover variants
+        let variants = discover_variants(&log);
+        assert_eq!(variants.len(), 3, "Expected 3 variants");
+
+        // Detect anomalies with 5% threshold (variants with <5% support are anomalies)
+        let (normal, anomalies) = detect_anomalies(&variants, 5.0);
+
+        // Verify: 1 normal variant (≥5%)
+        assert_eq!(normal.len(), 1, "Expected 1 normal variant, got {}", normal.len());
+
+        // Verify: 2 anomalies (<5%)
+        assert_eq!(
+            anomalies.len(),
+            2,
+            "Expected 2 anomalies, got {}",
+            anomalies.len()
+        );
+
+        // Verify: Normal variant has the correct frequency (95)
+        if let Some(normal_variant) = normal.first() {
+            let count = variants.get(normal_variant).unwrap();
+            assert_eq!(*count, 95, "Normal variant should have 95 occurrences");
+        }
+
+        // Verify: Anomalies have correct frequencies (3 and 2)
+        let mut anomaly_counts: Vec<usize> = anomalies
+            .iter()
+            .map(|v| *variants.get(v).unwrap())
+            .collect();
+        anomaly_counts.sort();
+
+        assert_eq!(
+            anomaly_counts,
+            vec![2, 3],
+            "Anomalies should have frequencies [2, 3]"
+        );
+
+        // Verify: Anomaly coverage = 5%
+        let anomaly_total: usize = anomaly_counts.iter().sum();
+        let anomaly_pct = (anomaly_total as f64) / (log.traces.len() as f64) * 100.0;
+        assert!(
+            (anomaly_pct - 5.0).abs() < 0.01,
+            "Anomalies should cover 5%, got {}%",
+            anomaly_pct
+        );
+    }
+}

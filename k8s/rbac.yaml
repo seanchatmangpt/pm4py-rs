@@ -1,0 +1,260 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pm4py-api
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "Service account for pm4py-api deployment"
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pm4py-api-role
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "Role for pm4py-api pods - minimal required permissions"
+spec:
+  rules:
+    # ConfigMap read access
+    - apiGroups: [""]
+      resources: ["configmaps"]
+      verbs: ["get", "list", "watch"]
+      resourceNames: ["pm4py-retention-policy", "pm4py-config"]
+
+    # Secret read access (for credentials, TLS certs)
+    - apiGroups: [""]
+      resources: ["secrets"]
+      verbs: ["get", "list"]
+      resourceNames: ["pm4py-api-tls", "pm4py-credentials"]
+
+    # Pod read access (for peer discovery)
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list", "watch"]
+      namespaceSelector:
+        matchLabels:
+          name: pm4py-prod
+
+    # Endpoints read access (for service discovery)
+    - apiGroups: [""]
+      resources: ["endpoints"]
+      verbs: ["get", "list", "watch"]
+      resourceNames: ["pm4py-api", "pm4py-api-internal"]
+
+    # Events write access (for logging)
+    - apiGroups: [""]
+      resources: ["events"]
+      verbs: ["create", "patch", "update"]
+
+    # Lease access (for leader election)
+    - apiGroups: ["coordination.k8s.io"]
+      resources: ["leases"]
+      verbs: ["get", "list", "watch", "create", "update", "patch"]
+      resourceNames: ["pm4py-api-leader"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pm4py-api-rolebinding
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "RoleBinding for pm4py-api ServiceAccount"
+spec:
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: pm4py-api-role
+
+  subjects:
+    - kind: ServiceAccount
+      name: pm4py-api
+      namespace: pm4py-prod
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pm4py-api-cluster-role
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "ClusterRole for cross-namespace pm4py-api access"
+spec:
+  rules:
+    # Namespace read access
+    - apiGroups: [""]
+      resources: ["namespaces"]
+      verbs: ["get", "list", "watch"]
+
+    # PersistentVolume read access
+    - apiGroups: [""]
+      resources: ["persistentvolumes"]
+      verbs: ["get", "list", "watch"]
+
+    # StorageClass read access
+    - apiGroups: ["storage.k8s.io"]
+      resources: ["storageclasses"]
+      verbs: ["get", "list"]
+
+    # Node read access (for affinity rules)
+    - apiGroups: [""]
+      resources: ["nodes"]
+      verbs: ["get", "list", "watch"]
+
+    # NetworkPolicy read access
+    - apiGroups: ["networking.k8s.io"]
+      resources: ["networkpolicies"]
+      verbs: ["get", "list", "watch"]
+
+    # Ingress read access
+    - apiGroups: ["networking.k8s.io"]
+      resources: ["ingresses"]
+      verbs: ["get", "list", "watch"]
+
+    # Custom resource definitions read
+    - apiGroups: ["apiextensions.k8s.io"]
+      resources: ["customresourcedefinitions"]
+      verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pm4py-api-cluster-rolebinding
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "ClusterRoleBinding for pm4py-api"
+spec:
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: pm4py-api-cluster-role
+
+  subjects:
+    - kind: ServiceAccount
+      name: pm4py-api
+      namespace: pm4py-prod
+
+---
+apiVersion: policy/v1
+kind: PodSecurityPolicy
+metadata:
+  name: pm4py-api-psp
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: "runtime/default"
+    apparmor.security.beta.kubernetes.io/allowedProfileNames: "runtime/default"
+spec:
+  # Privilege escalation
+  privileged: false
+  allowPrivilegeEscalation: false
+
+  # Required security context
+  requiredDropCapabilities:
+    - ALL
+
+  # Allowed capabilities (if any)
+  allowedCapabilities: []
+  addedCapabilities: []
+
+  # User context
+  runAsUser:
+    rule: MustRunAsNonRoot
+  runAsGroup:
+    rule: MustRunAs
+    ranges:
+      - min: 1001
+        max: 1001
+
+  # Filesystem
+  fsGroup:
+    rule: MustRunAs
+    ranges:
+      - min: 1001
+        max: 1001
+
+  readOnlyRootFilesystem: false
+
+  # Volumes
+  volumes:
+    - "configMap"
+    - "emptyDir"
+    - "projected"
+    - "secret"
+    - "downwardAPI"
+    - "persistentVolumeClaim"
+
+  # Host access
+  hostNetwork: false
+  hostIPC: false
+  hostPID: false
+
+  # Selinux
+  seLinux:
+    rule: MustRunAs
+    seLinuxOptions:
+      level: "s0:c123,c456"
+
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: pm4py-api-mtls
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+spec:
+  # Mutual TLS enforcement
+  mtls:
+    mode: STRICT  # Enforce mTLS for all traffic
+
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: pm4py-api-authz
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+spec:
+  rules:
+    # Allow from ingress-nginx
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "DELETE"]
+            paths:
+              - "/api/*"
+              - "/health"
+              - "/ready"
+
+    # Allow from prometheus
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/monitoring/sa/prometheus"
+      to:
+        - operation:
+            methods: ["GET"]
+            paths:
+              - "/metrics"
+
+    # Allow pod-to-pod communication (same namespace)
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/pm4py-prod/sa/*"
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "DELETE"]

@@ -1,0 +1,198 @@
+/// Chicago TDD — RED phase for YAWL span emission.
+///
+/// Verifies that `YawlClient::check_conformance` emits:
+///   1. A root `yawl.case` span with `yawl.spec.uri` and `yawl.task.id` attributes.
+///   2. A child `yawl.task.execution` span with `yawl.token.consumed` and
+///      `yawl.token.produced` attributes.
+///
+/// The YAWL HTTP engine is NOT running during unit tests. We use `YawlClient::new_with_tracing`
+/// (dependency-injected `Tracing`) so we can inspect emitted spans without needing a live
+/// OTLP collector or the ~/yawlv6 Tomcat server.
+///
+/// The HTTP call itself will fail with `YawlError::Unreachable` (engine not on port 19999),
+/// which is correct Armstrong behaviour: the span is still emitted and closed with
+/// status = "error" so the supervisor tree can observe the failure.
+///
+/// Run: `cargo test yawl_spans`
+use pm4py::observability::Tracing;
+use pm4py::semconv::yawl_attributes::{YAWL_SPEC_URI, YAWL_TASK_ID, YAWL_TOKEN_CONSUMED, YAWL_TOKEN_PRODUCED};
+use pm4py::semconv::yawl_span_names::{YAWL_CASE_SPAN, YAWL_TASK_EXECUTION_SPAN};
+use pm4py::yawl::{YawlClient, YawlError};
+use std::sync::Arc;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 1 (RED): check_conformance emits a yawl.case root span
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_yawl_check_conformance_emits_case_span() {
+    // Arrange — isolated tracing collector; engine deliberately absent on port 19998
+    let tracing = Arc::new(Tracing::new());
+    std::env::set_var("YAWLV6_URL", "http://localhost:19998");
+
+    let spec_xml = pm4py::yawl::petri_net_to_yawl_xml(&["register", "approve", "pay"]);
+    let client = YawlClient::new_with_tracing(Arc::clone(&tracing));
+
+    // Act — engine unreachable, but span MUST still be emitted
+    let result = client.check_conformance(&spec_xml, b"{}");
+
+    // Assert — HTTP call failed (engine not running)
+    assert!(
+        matches!(result, Err(YawlError::Unreachable)),
+        "expected Unreachable, got {:?}",
+        result
+    );
+
+    // Assert — yawl.case span was emitted
+    let spans = tracing.get_spans();
+    let case_span = spans
+        .iter()
+        .find(|s| s.span_name == YAWL_CASE_SPAN)
+        .expect("yawl.case span must be emitted even when engine is unreachable");
+
+    assert_eq!(
+        case_span.span_name, YAWL_CASE_SPAN,
+        "span name must be semconv constant yawl.case"
+    );
+
+    // yawl.spec.uri attribute must be present
+    assert!(
+        case_span.attributes.contains_key(YAWL_SPEC_URI),
+        "yawl.case span must carry {} attribute; got {:?}",
+        YAWL_SPEC_URI,
+        case_span.attributes.keys().collect::<Vec<_>>()
+    );
+
+    // span must be closed (status != "active") — Armstrong: error is information
+    assert_ne!(
+        case_span.status, "active",
+        "yawl.case span must be closed after check_conformance returns"
+    );
+    assert!(
+        case_span.end_time_us.is_some(),
+        "yawl.case span must have end_time_us set"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 2 (RED): check_conformance emits a yawl.task.execution child span
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_yawl_check_conformance_emits_task_execution_span() {
+    let tracing = Arc::new(Tracing::new());
+    std::env::set_var("YAWLV6_URL", "http://localhost:19998");
+
+    let spec_xml = pm4py::yawl::petri_net_to_yawl_xml(&["task_a", "task_b"]);
+    let client = YawlClient::new_with_tracing(Arc::clone(&tracing));
+
+    let _ = client.check_conformance(&spec_xml, b"{}");
+
+    let spans = tracing.get_spans();
+    let task_span = spans
+        .iter()
+        .find(|s| s.span_name == YAWL_TASK_EXECUTION_SPAN)
+        .expect("yawl.task.execution span must be emitted");
+
+    assert_eq!(task_span.span_name, YAWL_TASK_EXECUTION_SPAN);
+
+    // Must carry yawl.task.id
+    assert!(
+        task_span.attributes.contains_key(YAWL_TASK_ID),
+        "yawl.task.execution span must carry {} attribute; got {:?}",
+        YAWL_TASK_ID,
+        task_span.attributes.keys().collect::<Vec<_>>()
+    );
+
+    // Must carry token flow attributes
+    assert!(
+        task_span.attributes.contains_key(YAWL_TOKEN_CONSUMED),
+        "yawl.task.execution span must carry {} attribute",
+        YAWL_TOKEN_CONSUMED
+    );
+    assert!(
+        task_span.attributes.contains_key(YAWL_TOKEN_PRODUCED),
+        "yawl.task.execution span must carry {} attribute",
+        YAWL_TOKEN_PRODUCED
+    );
+
+    // Must be closed
+    assert_ne!(task_span.status, "active");
+    assert!(task_span.end_time_us.is_some());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 3 (RED): task.execution span is a child of the yawl.case span
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_yawl_task_execution_span_is_child_of_case_span() {
+    let tracing = Arc::new(Tracing::new());
+    std::env::set_var("YAWLV6_URL", "http://localhost:19998");
+
+    let spec_xml = pm4py::yawl::petri_net_to_yawl_xml(&["step1", "step2", "step3"]);
+    let client = YawlClient::new_with_tracing(Arc::clone(&tracing));
+
+    let _ = client.check_conformance(&spec_xml, b"{}");
+
+    let spans = tracing.get_spans();
+
+    let case_span = spans
+        .iter()
+        .find(|s| s.span_name == YAWL_CASE_SPAN)
+        .expect("yawl.case span must exist");
+
+    let task_spans: Vec<_> = spans
+        .iter()
+        .filter(|s| s.span_name == YAWL_TASK_EXECUTION_SPAN)
+        .collect();
+
+    assert!(
+        !task_spans.is_empty(),
+        "at least one yawl.task.execution span must exist"
+    );
+
+    for task_span in &task_spans {
+        assert_eq!(
+            task_span.parent_span_id.as_deref(),
+            Some(case_span.span_id.as_str()),
+            "yawl.task.execution span (id={}) must have yawl.case span (id={}) as parent",
+            task_span.span_id,
+            case_span.span_id
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4 (RED): semconv constants have correct OTel names
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn yawl_case_span_name_constant_matches_semconv_schema() {
+    assert_eq!(YAWL_CASE_SPAN, "yawl.case");
+}
+
+#[test]
+fn yawl_task_execution_span_name_constant_matches_semconv_schema() {
+    assert_eq!(YAWL_TASK_EXECUTION_SPAN, "yawl.task.execution");
+}
+
+#[test]
+fn yawl_spec_uri_attribute_constant_matches_semconv_schema() {
+    assert_eq!(YAWL_SPEC_URI, "yawl.spec.uri");
+}
+
+#[test]
+fn yawl_task_id_attribute_constant_matches_semconv_schema() {
+    assert_eq!(YAWL_TASK_ID, "yawl.task.id");
+}
+
+#[test]
+fn yawl_token_consumed_attribute_constant_matches_semconv_schema() {
+    assert_eq!(YAWL_TOKEN_CONSUMED, "yawl.token.consumed");
+}
+
+#[test]
+fn yawl_token_produced_attribute_constant_matches_semconv_schema() {
+    assert_eq!(YAWL_TOKEN_PRODUCED, "yawl.token.produced");
+}

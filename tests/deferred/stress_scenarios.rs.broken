@@ -1,0 +1,644 @@
+use chrono::{Duration, Utc};
+use pm4py::conformance::TokenReplay;
+use pm4py::discovery::AlphaMiner;
+/// Stress Scenario Tests for pm4py-rust
+///
+/// Tests system behavior under extreme edge cases and adverse conditions:
+/// - Scenario 1: Rapid-fire logging (1000 events/sec burst)
+/// - Scenario 2: Memory pressure (approaching heap limits)
+/// - Scenario 3: Pathological logs (worst-case complexity)
+/// - Scenario 4: Cascading failures (multiple simultaneous errors)
+/// - Scenario 5: Long-running operations (sustained load)
+///
+/// All scenarios validate:
+/// - No panic/crash under extreme conditions
+/// - Graceful error handling and degradation
+/// - Resource recovery after exhaustion
+/// - Data integrity maintained
+/// - Predictable failure modes (not undefined behavior)
+use pm4py::log::{Event, EventLog, Trace};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Instant;
+
+// ============================================================================
+// HELPER: Pathological Log Generation
+// ============================================================================
+
+/// Generate a log with extremely deep activity sequences
+fn generate_deep_sequence_log(depth: usize, num_traces: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("DEEP_TRACE_{}", trace_id));
+        let mut event_time = base_time + Duration::hours(trace_id as i64);
+
+        for step in 0..depth {
+            let activity = format!("activity_{}", step);
+            trace.add_event(Event::new(&activity, event_time));
+            event_time += Duration::seconds(1);
+        }
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+/// Generate a log with extreme branching (many unique paths)
+fn generate_branching_log(num_traces: usize, branches: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("BRANCH_TRACE_{}", trace_id));
+        let mut event_time = base_time + Duration::hours(trace_id as i64);
+
+        // Start
+        trace.add_event(Event::new("start", event_time));
+        event_time += Duration::seconds(1);
+
+        // Each trace follows a unique path
+        let branch_seq = trace_id % branches;
+        for step in 0..branches {
+            let activity = if step == branch_seq {
+                format!("branch_{}_taken", step)
+            } else {
+                format!("branch_{}_skipped", step)
+            };
+
+            trace.add_event(Event::new(&activity, event_time));
+            event_time += Duration::seconds(1);
+        }
+
+        // End
+        trace.add_event(Event::new("end", event_time));
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+/// Generate a log with maximum loops/rework
+fn generate_loop_intensive_log(num_traces: usize, max_loops: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("LOOP_TRACE_{}", trace_id));
+        let mut event_time = base_time + Duration::hours(trace_id as i64);
+
+        trace.add_event(Event::new("start", event_time));
+        event_time += Duration::seconds(1);
+
+        let num_loops = (trace_id % max_loops) + 1;
+
+        for loop_num in 0..num_loops {
+            trace.add_event(Event::new("process", event_time));
+            event_time += Duration::seconds(1);
+
+            trace.add_event(Event::new("check", event_time));
+            event_time += Duration::seconds(1);
+
+            if loop_num < num_loops - 1 {
+                trace.add_event(Event::new("rework", event_time));
+                event_time += Duration::seconds(1);
+            }
+        }
+
+        trace.add_event(Event::new("complete", event_time));
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+/// Generate log with many unique single-step traces
+fn generate_fragmented_log(num_unique_activities: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for activity_id in 0..num_unique_activities {
+        let mut trace = Trace::new(format!("FRAG_TRACE_{}", activity_id));
+        let activity_name = format!("activity_{}", activity_id);
+        trace.add_event(Event::new(
+            &activity_name,
+            base_time + Duration::seconds(activity_id as i64),
+        ));
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+/// Generate log with maximum nesting/parallelism
+fn generate_complex_structure_log(num_traces: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("COMPLEX_TRACE_{}", trace_id));
+        let mut event_time = base_time + Duration::hours(trace_id as i64);
+
+        // Parallel-like sequence
+        for phase in 0..10 {
+            for step in 0..10 {
+                let activity = format!("phase_{}_step_{}", phase, step);
+                trace.add_event(Event::new(&activity, event_time));
+                event_time += Duration::seconds(1);
+
+                // Some backward flows (complex)
+                if step > 0 && step % 3 == 0 {
+                    trace.add_event(Event::new(&format!("phase_{}_rework", phase), event_time));
+                    event_time += Duration::seconds(1);
+                }
+            }
+        }
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+// ============================================================================
+// SCENARIO 1: RAPID-FIRE LOGGING (1000 events/sec burst)
+// ============================================================================
+
+#[test]
+fn scenario_1_rapid_fire_logging() {
+    println!("\n=== SCENARIO 1: RAPID-FIRE LOGGING (5000 events burst) ===");
+
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+    let mut trace = Trace::new("RAPID_FIRE".to_string());
+
+    // Simulate 5 seconds of 1000 events/sec (5000 events)
+    let total_events = 5000;
+    let events_per_sec = 1000;
+
+    let start = Instant::now();
+
+    for i in 0..total_events {
+        let second = i / events_per_sec;
+        let millis = ((i % events_per_sec) * 1000 / events_per_sec) as u64;
+        let event_time =
+            base_time + Duration::seconds(second as i64) + Duration::millis(millis as i64);
+
+        let activity = format!("event_{}", i);
+        trace.add_event(Event::new(&activity, event_time));
+    }
+
+    log.add_trace(trace);
+
+    let log_creation = start.elapsed();
+    println!("  Created {} events in: {:?}", total_events, log_creation);
+    println!(
+        "  Event creation rate: {:.0} events/sec",
+        total_events as f64 / log_creation.as_secs_f64()
+    );
+
+    // Now try to process it
+    let discovery_start = Instant::now();
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let discovery_time = discovery_start.elapsed();
+    println!("  Discovery completed in: {:?}", discovery_time);
+    println!(
+        "  Model size: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(!model.places().is_empty());
+    assert!(log_creation.as_secs() < 30, "Event creation took too long");
+}
+
+// ============================================================================
+// SCENARIO 2: MEMORY PRESSURE (Approaching heap limits)
+// ============================================================================
+
+#[test]
+fn scenario_2_memory_pressure() {
+    println!("\n=== SCENARIO 2: MEMORY PRESSURE (Large event log) ===");
+
+    // Create a large log
+    println!("  Allocating large log (50k events)...");
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    let start = Instant::now();
+
+    let mut trace = Trace::new("LARGE_TRACE".to_string());
+    for i in 0..50_000 {
+        let activity = format!("activity_{}", i % 100); // Limited activity names
+        let event_time = base_time + Duration::milliseconds(i as i64);
+        trace.add_event(Event::new(&activity, event_time));
+
+        if i % 10_000 == 0 && i > 0 {
+            println!("  Added {} events", i);
+        }
+    }
+
+    log.add_trace(trace);
+    let allocation_time = start.elapsed();
+
+    let total_events: usize = log.traces().iter().map(|t| t.events().len()).sum();
+
+    println!(
+        "  Allocated {} events in: {:?}",
+        total_events, allocation_time
+    );
+
+    // Try discovery (may be slow but shouldn't crash)
+    println!("  Attempting discovery on large log...");
+    let discovery_start = Instant::now();
+
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let discovery_time = discovery_start.elapsed();
+    println!("  Discovery completed in: {:?}", discovery_time);
+    println!(
+        "  Model: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    // Memory should be freed on drop
+    drop(log);
+    println!("  Log deallocated successfully");
+}
+
+// ============================================================================
+// SCENARIO 3: PATHOLOGICAL LOGS (Worst-case complexity)
+// ============================================================================
+
+#[test]
+fn scenario_3_pathological_deep_sequence() {
+    println!("\n=== SCENARIO 3a: PATHOLOGICAL LOG (Deep sequence) ===");
+
+    let log = generate_deep_sequence_log(500, 10);
+    println!("  Generated log with {} traces", log.traces().len());
+
+    let start = Instant::now();
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let elapsed = start.elapsed();
+    println!("  Discovery completed in: {:?}", elapsed);
+    println!(
+        "  Model: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(elapsed.as_secs() < 60, "Deep sequence discovery timeout");
+}
+
+#[test]
+fn scenario_3_pathological_branching() {
+    println!("\n=== SCENARIO 3b: PATHOLOGICAL LOG (High branching) ===");
+
+    let log = generate_branching_log(500, 100);
+    println!(
+        "  Generated log with {} traces, 100 branches",
+        log.traces().len()
+    );
+
+    let start = Instant::now();
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let elapsed = start.elapsed();
+    println!("  Discovery completed in: {:?}", elapsed);
+    println!(
+        "  Model: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(elapsed.as_secs() < 60, "Branching discovery timeout");
+}
+
+#[test]
+fn scenario_3_pathological_loops() {
+    println!("\n=== SCENARIO 3c: PATHOLOGICAL LOG (Loop intensive) ===");
+
+    let log = generate_loop_intensive_log(500, 50);
+    println!(
+        "  Generated log with {} traces, up to 50 loops each",
+        log.traces().len()
+    );
+
+    let start = Instant::now();
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let elapsed = start.elapsed();
+    println!("  Discovery completed in: {:?}", elapsed);
+    println!(
+        "  Model: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(elapsed.as_secs() < 60, "Loop discovery timeout");
+}
+
+#[test]
+fn scenario_3_pathological_fragmented() {
+    println!("\n=== SCENARIO 3d: PATHOLOGICAL LOG (Fragmented) ===");
+
+    let log = generate_fragmented_log(5000);
+    println!(
+        "  Generated {} unique single-event traces",
+        log.traces().len()
+    );
+
+    let start = Instant::now();
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let elapsed = start.elapsed();
+    println!("  Discovery completed in: {:?}", elapsed);
+    println!(
+        "  Model: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(elapsed.as_secs() < 60, "Fragmented discovery timeout");
+}
+
+#[test]
+fn scenario_3_pathological_complex() {
+    println!("\n=== SCENARIO 3e: PATHOLOGICAL LOG (Complex structure) ===");
+
+    let log = generate_complex_structure_log(50);
+    println!("  Generated log with {} complex traces", log.traces().len());
+
+    let start = Instant::now();
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+
+    let elapsed = start.elapsed();
+    println!("  Discovery completed in: {:?}", elapsed);
+    println!(
+        "  Model: {} places, {} transitions",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(elapsed.as_secs() < 60, "Complex structure timeout");
+}
+
+// ============================================================================
+// SCENARIO 4: CASCADING FAILURES (Multiple simultaneous errors)
+// ============================================================================
+
+#[test]
+fn scenario_4_cascading_failures() {
+    println!("\n=== SCENARIO 4: CASCADING FAILURES (Multiple error types) ===");
+
+    let error_count = Arc::new(AtomicUsize::new(0));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    // Test 1: Discovery on pathological logs
+    {
+        let error_clone = Arc::clone(&error_count);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            for _i in 0..10 {
+                let log = generate_deep_sequence_log(200, 5);
+                let miner = AlphaMiner::new();
+                let model = miner.discover(&log);
+
+                if !model.places().is_empty() {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    error_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Test 2: Branching log discovery (high complexity)
+    {
+        let error_clone = Arc::clone(&error_count);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            for _i in 0..10 {
+                let log = generate_branching_log(100, 50);
+                let miner = AlphaMiner::new();
+                let model = miner.discover(&log);
+
+                if !model.places().is_empty() {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    error_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Test 3: Loop intensive discovery
+    {
+        let error_clone = Arc::clone(&error_count);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            for _i in 0..10 {
+                let log = generate_loop_intensive_log(100, 30);
+                let miner = AlphaMiner::new();
+                let model = miner.discover(&log);
+
+                if !model.places().is_empty() {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    error_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    let start = Instant::now();
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let errors = error_count.load(Ordering::SeqCst);
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}, Errors: {} (expected)", successes, errors);
+    println!("  System remained stable under cascading errors");
+
+    assert!(elapsed.as_secs() < 120, "Cascading failures test timeout");
+}
+
+// ============================================================================
+// SCENARIO 5: LONG-RUNNING OPERATIONS (Sustained load)
+// ============================================================================
+
+#[test]
+fn scenario_5_sustained_load_1000_operations() {
+    println!("\n=== SCENARIO 5: SUSTAINED LOAD (1000 sequential operations) ===");
+
+    let mut success = 0;
+    let mut errors = 0;
+    let start = Instant::now();
+
+    println!("  Starting 1000 discovery operations...");
+
+    for i in 0..1000 {
+        let log = match i % 5 {
+            0 => generate_branching_log(50, 20),
+            1 => generate_loop_intensive_log(50, 10),
+            2 => generate_complex_structure_log(20),
+            3 => generate_deep_sequence_log(100, 5),
+            _ => generate_fragmented_log(500),
+        };
+
+        let miner = AlphaMiner::new();
+        let model = miner.discover(&log);
+
+        if !model.places().is_empty() {
+            success += 1;
+        } else {
+            errors += 1;
+        }
+
+        if (i + 1) % 100 == 0 {
+            let elapsed = start.elapsed();
+            println!("  Completed {} operations in: {:?}", i + 1, elapsed);
+        }
+    }
+
+    let elapsed = start.elapsed();
+
+    println!("  Total operations: 1000");
+    println!("  Successes: {}, Errors: {}", success, errors);
+    println!("  Total time: {:?}", elapsed);
+    println!(
+        "  Average per operation: {:.2}ms",
+        elapsed.as_millis() as f64 / 1000.0
+    );
+
+    assert!(success > 900, "Success rate too low");
+    assert!(
+        elapsed.as_secs() < 600,
+        "Sustained load test timeout (10 min)"
+    );
+}
+
+// ============================================================================
+// SCENARIO 5b: 24-HOUR SIMULATION (Distributed operations)
+// ============================================================================
+
+#[test]
+fn scenario_5_24hr_simulation_concurrent() {
+    println!("\n=== SCENARIO 5b: 24-HOUR SIMULATION (100 concurrent, sustained) ===");
+
+    let duration = std::time::Duration::from_secs(30); // Test for 30 seconds
+    let success = Arc::new(AtomicUsize::new(0));
+    let errors = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    // Simulate 24 hours using 30-second timeframe (1000x compression)
+    for thread_id in 0..100 {
+        let success_clone = Arc::clone(&success);
+        let error_clone = Arc::clone(&errors);
+
+        let handle = thread::spawn(move || {
+            let thread_start = Instant::now();
+
+            while thread_start.elapsed() < duration {
+                let log = generate_test_log_varied(50, 10, thread_id);
+                let miner = AlphaMiner::new();
+                let model = miner.discover(&log);
+
+                if !model.places().is_empty() {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    error_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let total_ops = success.load(Ordering::SeqCst) + errors.load(Ordering::SeqCst);
+
+    println!("  Simulation completed in: {:?}", elapsed);
+    println!("  Total operations: {}", total_ops);
+    println!(
+        "  Success: {}, Errors: {}",
+        success.load(Ordering::SeqCst),
+        errors.load(Ordering::SeqCst)
+    );
+    println!(
+        "  Operations per second: {:.0}",
+        total_ops as f64 / elapsed.as_secs_f64()
+    );
+
+    assert!(total_ops > 50, "Very low operation count");
+}
+
+// ============================================================================
+// HELPER: Varied log generation
+// ============================================================================
+
+fn generate_test_log_varied(num_traces: usize, events_per_trace: usize, seed: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("TRACE_{}_{}", seed, trace_id));
+        let mut event_time = base_time + Duration::hours((trace_id + seed) as i64);
+
+        for event_seq in 0..events_per_trace {
+            let activity = match (event_seq + seed) % 7 {
+                0 => "start",
+                1 => "verify",
+                2 => "process",
+                3 => "check",
+                4 => "approve",
+                5 => "execute",
+                _ => "complete",
+            };
+
+            trace.add_event(Event::new(activity, event_time));
+            event_time += Duration::minutes(5);
+        }
+
+        log.add_trace(trace);
+    }
+
+    log
+}

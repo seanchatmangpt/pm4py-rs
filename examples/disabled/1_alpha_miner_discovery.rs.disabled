@@ -1,0 +1,114 @@
+//! Alpha Miner Discovery Example
+//!
+//! This example demonstrates the simplest form of process discovery using Alpha Miner.
+//! Alpha Miner is fast and works well for simple processes with clear control-flow patterns.
+//!
+//! Run: cargo run --example 1_alpha_miner_discovery
+
+use pm4py::{discovery::AlphaMiner, io::CSVReader, log::EventLog};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Alpha Miner Discovery Example ===\n");
+
+    // Step 1: Read an event log from CSV
+    println!("Step 1: Reading event log from CSV...");
+    let reader = CSVReader::new();
+    let log_path = Path::new("examples/data/simple_log.csv");
+
+    let log: EventLog = match reader.read(log_path) {
+        Ok(l) => {
+            println!("✓ Successfully read {} traces", l.traces.len());
+            l
+        }
+        Err(e) => {
+            // If file doesn't exist, create sample data programmatically
+            println!("✗ CSV file not found, creating sample log programmatically...");
+            create_sample_log()
+        }
+    };
+
+    println!("  Total events: {}", log.total_events());
+    println!("  Total activities: {}", log.unique_activities().len());
+    println!();
+
+    // Step 2: Discover process model using Alpha Miner
+    println!("Step 2: Discovering process model with Alpha Miner...");
+    let miner = AlphaMiner::new();
+    let petri_net = miner.discover(&log);
+
+    println!("✓ Process model discovered");
+    println!("  Places: {}", petri_net.places.len());
+    println!("  Transitions: {}", petri_net.transitions.len());
+    println!("  Arcs: {}", petri_net.arcs.len());
+    println!();
+
+    // Step 3: Display the discovered model
+    println!("Step 3: Discovered process model:");
+    println!("  Places:");
+    for place in &petri_net.places {
+        println!("    - {} (tokens: {})", place.id, place.tokens);
+    }
+    println!("  Transitions:");
+    for transition in &petri_net.transitions {
+        println!("    - {}", transition.label.as_deref().unwrap_or("tau"));
+    }
+    println!();
+
+    // Step 4: Display directly-follows relationships
+    println!("Step 4: Control-flow relationships:");
+    let activities = log.unique_activities();
+    println!("  Activities found: {:?}", activities);
+    println!();
+
+    // Step 5: Export to XES format
+    println!("Step 5: Exporting log to XES format...");
+    use pm4py::io::XESWriter;
+    let writer = XESWriter::new();
+    let output_path = Path::new("examples/data/output_log.xes");
+    match writer.write(&log, output_path) {
+        Ok(_) => println!("✓ Exported to examples/data/output_log.xes"),
+        Err(e) => println!("✗ Export failed: {}", e),
+    }
+
+    println!("\n=== Discovery complete ===");
+    Ok(())
+}
+
+/// Create a sample event log programmatically
+/// This simulates a simple purchase order process:
+/// Submit → Review → (Approve | Reject) → Payment → Complete
+fn create_sample_log() -> EventLog {
+    use chrono::Utc;
+    use pm4py::{Event, Trace};
+
+    let mut log = EventLog::new();
+
+    // Case 1: Normal flow (approved)
+    let mut trace1 = Trace::new("case-001");
+    trace1.add_event(Event::new("Submit PO", Utc::now()).with_resource("Alice"));
+    trace1.add_event(Event::new("Review PO", Utc::now()).with_resource("Bob"));
+    trace1.add_event(Event::new("Approve PO", Utc::now()).with_resource("Carol"));
+    trace1.add_event(Event::new("Payment", Utc::now()).with_resource("Diane"));
+    trace1.add_event(Event::new("Complete", Utc::now()).with_resource("System"));
+    log.add_trace(trace1);
+
+    // Case 2: Rejection flow
+    let mut trace2 = Trace::new("case-002");
+    trace2.add_event(Event::new("Submit PO", Utc::now()).with_resource("Alice"));
+    trace2.add_event(Event::new("Review PO", Utc::now()).with_resource("Bob"));
+    trace2.add_event(Event::new("Reject PO", Utc::now()).with_resource("Carol"));
+    trace2.add_event(Event::new("Complete", Utc::now()).with_resource("System"));
+    log.add_trace(trace2);
+
+    // Case 3: Another normal flow
+    let mut trace3 = Trace::new("case-003");
+    trace3.add_event(Event::new("Submit PO", Utc::now()).with_resource("Alice"));
+    trace3.add_event(Event::new("Review PO", Utc::now()).with_resource("Bob"));
+    trace3.add_event(Event::new("Approve PO", Utc::now()).with_resource("Carol"));
+    trace3.add_event(Event::new("Payment", Utc::now()).with_resource("Diane"));
+    trace3.add_event(Event::new("Complete", Utc::now()).with_resource("System"));
+    log.add_trace(trace3);
+
+    log
+}

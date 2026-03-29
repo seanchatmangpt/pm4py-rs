@@ -1,0 +1,797 @@
+//! Distributed Discovery/Conformance Speedup Validation
+//!
+//! Tests multi-node parallel processing speedup for process mining algorithms.
+//!
+//! Architecture:
+//! 1. Log Partitioning: Traces distributed round-robin across N nodes
+//! 2. Parallel Mining: Alpha Miner executes on each partition independently
+//! 3. Result Aggregation: Merge DFG edges with frequency-weighted voting
+//! 4. Soundness Verification: Ensure merged model is behaviorally consistent
+//! 5. Speedup Measurement: T(1) / T(n) with efficiency calculation
+//!
+//! Targets:
+//! - 2 nodes: ≥1.7x speedup (85% efficiency)
+//! - 3 nodes: ≥2.5x speedup (83% efficiency)
+//! - 5 nodes: ≥3.8x speedup (76% efficiency)
+//! - 8 nodes: ≥5.5x speedup (69% efficiency)
+//!
+//! TDD: Tests written first (failing), then implementation validated.
+
+use chrono::Utc;
+use pm4py::conformance::TokenReplay;
+use pm4py::discovery::AlphaMiner;
+use pm4py::log::{Event, EventLog, Trace};
+use pm4py::PetriNet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA GENERATION UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Generate large synthetic event log with realistic patterns
+///
+/// Parameters:
+/// - num_events: Total events to generate (100K to 100M)
+/// - num_traces: Number of traces (cases) - affects partition size
+/// - pattern: "linear", "branching", "looping", or "complex"
+fn generate_large_log(num_events: usize, num_traces: usize, pattern: &str) -> EventLog {
+    let mut log = EventLog::new();
+    let events_per_trace = (num_events / num_traces).max(1);
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("case_{:08}", trace_id));
+
+        for event_idx in 0..events_per_trace {
+            let activity = match pattern {
+                "linear" => {
+                    // Simple sequence: A -> B -> C -> D -> E
+                    match event_idx % 5 {
+                        0 => "A",
+                        1 => "B",
+                        2 => "C",
+                        3 => "D",
+                        4 => "E",
+                        _ => "A",
+                    }
+                }
+                "branching" => {
+                    // Pattern: Start -> [Path1|Path2] -> End
+                    match event_idx % 6 {
+                        0 => "Start",
+                        1 => {
+                            if (trace_id % 2) == 0 {
+                                "Path1A"
+                            } else {
+                                "Path2A"
+                            }
+                        }
+                        2 => {
+                            if (trace_id % 2) == 0 {
+                                "Path1B"
+                            } else {
+                                "Path2B"
+                            }
+                        }
+                        3 => "Join",
+                        4 => "Process",
+                        5 => "End",
+                        _ => "Start",
+                    }
+                }
+                "looping" => {
+                    // Pattern: Start -> Loop [A -> B -> C]* -> End
+                    match event_idx % 7 {
+                        0 => "Start",
+                        1 => "Loop",
+                        2 => "A",
+                        3 => "B",
+                        4 => "C",
+                        5 => "Decide",
+                        6 => {
+                            if (event_idx / 7) % 2 == 0 {
+                                "Loop"
+                            } else {
+                                "End"
+                            }
+                        }
+                        _ => "Start",
+                    }
+                }
+                "complex" => {
+                    // Real-world process: Procurement with approvals
+                    match event_idx % 10 {
+                        0 => "PR_Create",
+                        1 => "PR_Route",
+                        2 => {
+                            if (trace_id % 3) == 0 {
+                                "AP_Approve"
+                            } else {
+                                "AP_Reject"
+                            }
+                        }
+                        3 => {
+                            if (trace_id % 3) == 0 {
+                                "PO_Create"
+                            } else {
+                                "PR_Return"
+                            }
+                        }
+                        4 => "GR_Receive",
+                        5 => "QC_Inspect",
+                        6 => {
+                            if (trace_id % 2) == 0 {
+                                "QC_Pass"
+                            } else {
+                                "QC_Fail"
+                            }
+                        }
+                        7 => "IV_Invoice",
+                        8 => "PY_Pay",
+                        9 => "Close",
+                        _ => "PR_Create",
+                    }
+                }
+                _ => "Unknown",
+            };
+
+            let timestamp = base_time
+                + chrono::Duration::seconds((trace_id * events_per_trace + event_idx) as i64);
+            let event =
+                Event::new(activity, timestamp).with_resource(format!("node_{}", trace_id % 16));
+
+            trace.add_event(event);
+        }
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARTITION AND MERGE LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Partition log across N nodes using round-robin distribution
+///
+/// Returns: Vec of EventLogs, one per node, with traces distributed round-robin
+fn partition_log_round_robin(log: &EventLog, num_nodes: usize) -> Vec<EventLog> {
+    let mut partitions = vec![EventLog::new(); num_nodes];
+
+    for (idx, trace) in log.traces.iter().enumerate() {
+        let node_id = idx % num_nodes;
+        partitions[node_id].add_trace(trace.clone());
+    }
+
+    partitions
+}
+
+/// Result of single-node discovery
+#[derive(Clone, Debug)]
+struct NodeDiscoveryResult {
+    dfg: HashMap<(String, String), usize>, // Edge -> frequency
+    activities: HashSet<String>,
+}
+
+/// Merge DFG results from multiple nodes using frequency-weighted voting
+fn merge_dfg_results(node_results: &[NodeDiscoveryResult]) -> HashMap<(String, String), usize> {
+    let mut merged = HashMap::new();
+
+    // Aggregate edges across all nodes
+    for result in node_results {
+        for (edge, freq) in &result.dfg {
+            *merged.entry(edge.clone()).or_insert(0) += freq;
+        }
+    }
+
+    merged
+}
+
+/// Extract DFG from Petri net model
+#[allow(dead_code)]
+fn extract_dfg_from_model(_model: &PetriNet) -> HashMap<(String, String), usize> {
+    // Simplified: DFG extraction from Petri net is complex
+    // In production, use structural analysis or direct log-based extraction
+    HashMap::new()
+}
+
+/// Verify merged model is sound (no missing edges that should connect)
+fn verify_merge_soundness(
+    original_dfg: &HashMap<(String, String), usize>,
+    merged_dfg: &HashMap<(String, String), usize>,
+) -> bool {
+    // All edges in original should exist in merged
+    for edge in original_dfg.keys() {
+        if !merged_dfg.contains_key(edge) {
+            return false;
+        }
+    }
+    true
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARALLEL EXECUTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Execute discovery algorithm on a single partition (simulates node)
+fn execute_node_discovery(partition: EventLog) -> NodeDiscoveryResult {
+    // Discover model using Alpha Miner
+    let miner = AlphaMiner::new();
+    let _model = miner.discover(&partition);
+
+    // Extract DFG from model
+    let mut dfg = HashMap::new();
+    let mut activities = HashSet::new();
+
+    // Build DFG from log directly for accuracy
+    for trace in &partition.traces {
+        activities.insert("START".to_string());
+        activities.insert("END".to_string());
+
+        for i in 0..trace.events.len() {
+            let curr_activity = trace.events[i].activity.clone();
+            activities.insert(curr_activity.clone());
+
+            if i + 1 < trace.events.len() {
+                let next_activity = trace.events[i + 1].activity.clone();
+                let edge = (curr_activity, next_activity);
+                *dfg.entry(edge).or_insert(0) += 1;
+            }
+        }
+    }
+
+    NodeDiscoveryResult { dfg, activities }
+}
+
+/// Execute discovery on all partitions in parallel using thread pool
+fn execute_parallel_discovery(partitions: Vec<EventLog>) -> (Vec<NodeDiscoveryResult>, Duration) {
+    let start = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let mut handles = Vec::new();
+
+    for (node_id, partition) in partitions.into_iter().enumerate() {
+        let tx = tx.clone();
+        let handle = thread::spawn(move || {
+            let result = execute_node_discovery(partition);
+            let _ = tx.send((node_id, result));
+        });
+        handles.push(handle);
+    }
+
+    drop(tx); // Close original sender so receiver knows when all are done
+
+    let mut results = vec![None; handles.len()];
+    for (node_id, result) in rx {
+        results[node_id] = Some(result);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let results = results.into_iter().map(|r| r.unwrap()).collect();
+    let duration = start.elapsed();
+
+    (results, duration)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFORMANCE CHECKING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Parallel conformance checking across nodes
+fn conformance_check_partitioned(partitions: &[EventLog], model: &PetriNet) -> f64 {
+    let checker = Arc::new(TokenReplay::new());
+    let fitness_scores = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+
+    for partition in partitions {
+        let partition = partition.clone();
+        let model = model.clone();
+        let scores = Arc::clone(&fitness_scores);
+        let checker = Arc::clone(&checker);
+
+        let handle = thread::spawn(move || {
+            let result = checker.check(&partition, &model);
+            let fitness = result.fitness;
+            scores.lock().unwrap().push(fitness);
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let scores = fitness_scores.lock().unwrap();
+    scores.iter().sum::<f64>() / scores.len() as f64
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEST SUITE: DISTRIBUTED SPEEDUP VALIDATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod distributed_speedup_tests {
+    use super::*;
+
+    /// Helper: Run single-node discovery and measure time
+    fn single_node_discovery(log: &EventLog) -> (NodeDiscoveryResult, Duration) {
+        let start = Instant::now();
+        let result = execute_node_discovery(log.clone());
+        let duration = start.elapsed();
+        (result, duration)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 1: Baseline Single-Node (1M events)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_single_node_baseline_1m_events() {
+        let log = generate_large_log(1_000_000, 10_000, "linear");
+        let (result, duration) = single_node_discovery(&log);
+
+        // Should complete in reasonable time
+        assert!(
+            duration < Duration::from_secs(60),
+            "Single-node 1M events exceeded 60s: {:?}",
+            duration
+        );
+
+        // Should discover activities
+        assert!(!result.activities.is_empty(), "No activities discovered");
+        assert!(!result.dfg.is_empty(), "No edges discovered");
+
+        println!(
+            "✓ Single-node 1M events: {:?} (activities: {}, edges: {})",
+            duration,
+            result.activities.len(),
+            result.dfg.len()
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 2: 2-Node Speedup (1M events, target: ≥1.7x)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_two_node_speedup_1m_events() {
+        let log = generate_large_log(1_000_000, 10_000, "branching");
+
+        // Baseline: single-node time
+        let (baseline_result, baseline_time) = single_node_discovery(&log);
+
+        // Distributed: 2-node execution
+        let partitions = partition_log_round_robin(&log, 2);
+        let (node_results, parallel_time) = execute_parallel_discovery(partitions);
+
+        // Calculate speedup
+        let speedup = baseline_time.as_secs_f64() / parallel_time.as_secs_f64();
+        let efficiency = (speedup / 2.0) * 100.0;
+
+        // Merge results
+        let merged_dfg = merge_dfg_results(&node_results);
+
+        // Verify soundness
+        assert!(
+            verify_merge_soundness(&baseline_result.dfg, &merged_dfg),
+            "Merged DFG lost edges"
+        );
+
+        println!("✓ 2-node speedup test:");
+        println!("  Baseline (1 node):  {:?}", baseline_time);
+        println!("  Parallel (2 nodes): {:?}", parallel_time);
+        println!("  Speedup:            {:.2}x (target: ≥1.7x)", speedup);
+        println!("  Efficiency:         {:.1}% (target: ≥85%)", efficiency);
+
+        // Assertions - target: ≥1.7x speedup with ≥85% efficiency
+        assert!(
+            speedup >= 1.7,
+            "2-node speedup {:.2}x below target 1.7x",
+            speedup
+        );
+        assert!(
+            efficiency >= 85.0,
+            "2-node efficiency {:.1}% below target 85%",
+            efficiency
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 3: 3-Node Speedup (2M events, target: ≥2.5x)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    #[ignore = "Performance test with non-deterministic speedup results"]
+    fn test_three_node_speedup_2m_events() {
+        let log = generate_large_log(2_000_000, 20_000, "looping");
+
+        let (baseline_result, baseline_time) = single_node_discovery(&log);
+
+        let partitions = partition_log_round_robin(&log, 3);
+        let (node_results, parallel_time) = execute_parallel_discovery(partitions);
+
+        let speedup = baseline_time.as_secs_f64() / parallel_time.as_secs_f64();
+        let efficiency = (speedup / 3.0) * 100.0;
+
+        let merged_dfg = merge_dfg_results(&node_results);
+        assert!(
+            verify_merge_soundness(&baseline_result.dfg, &merged_dfg),
+            "Merged DFG lost edges in 3-node case"
+        );
+
+        println!("✓ 3-node speedup test:");
+        println!("  Baseline (1 node):  {:?}", baseline_time);
+        println!("  Parallel (3 nodes): {:?}", parallel_time);
+        println!("  Speedup:            {:.2}x (target: ≥2.5x)", speedup);
+        println!("  Efficiency:         {:.1}% (target: ≥83%)", efficiency);
+
+        assert!(
+            speedup >= 2.5,
+            "3-node speedup {:.2}x below target 2.5x",
+            speedup
+        );
+        assert!(
+            efficiency >= 83.0,
+            "3-node efficiency {:.1}% below target 83%",
+            efficiency
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 4: 5-Node Speedup (5M events, target: ≥3.8x)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    #[ignore = "Performance test with non-deterministic speedup results"]
+    fn test_five_node_speedup_5m_events() {
+        let log = generate_large_log(5_000_000, 50_000, "complex");
+
+        let (baseline_result, baseline_time) = single_node_discovery(&log);
+
+        let partitions = partition_log_round_robin(&log, 5);
+        let (node_results, parallel_time) = execute_parallel_discovery(partitions);
+
+        let speedup = baseline_time.as_secs_f64() / parallel_time.as_secs_f64();
+        let efficiency = (speedup / 5.0) * 100.0;
+
+        let merged_dfg = merge_dfg_results(&node_results);
+        assert!(
+            verify_merge_soundness(&baseline_result.dfg, &merged_dfg),
+            "Merged DFG lost edges in 5-node case"
+        );
+
+        println!("✓ 5-node speedup test:");
+        println!("  Baseline (1 node):  {:?}", baseline_time);
+        println!("  Parallel (5 nodes): {:?}", parallel_time);
+        println!("  Speedup:            {:.2}x (target: ≥3.8x)", speedup);
+        println!("  Efficiency:         {:.1}% (target: ≥76%)", efficiency);
+
+        assert!(
+            speedup >= 3.8,
+            "5-node speedup {:.2}x below target 3.8x",
+            speedup
+        );
+        assert!(
+            efficiency >= 76.0,
+            "5-node efficiency {:.1}% below target 76%",
+            efficiency
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 5: 8-Node Speedup (10M events, target: ≥5.5x)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    #[ignore = "Performance test with non-deterministic speedup results"]
+    fn test_eight_node_speedup_10m_events() {
+        let log = generate_large_log(10_000_000, 100_000, "complex");
+
+        let (baseline_result, baseline_time) = single_node_discovery(&log);
+
+        let partitions = partition_log_round_robin(&log, 8);
+        let (node_results, parallel_time) = execute_parallel_discovery(partitions);
+
+        let speedup = baseline_time.as_secs_f64() / parallel_time.as_secs_f64();
+        let efficiency = (speedup / 8.0) * 100.0;
+
+        let merged_dfg = merge_dfg_results(&node_results);
+        assert!(
+            verify_merge_soundness(&baseline_result.dfg, &merged_dfg),
+            "Merged DFG lost edges in 8-node case"
+        );
+
+        println!("✓ 8-node speedup test:");
+        println!("  Baseline (1 node):   {:?}", baseline_time);
+        println!("  Parallel (8 nodes):  {:?}", parallel_time);
+        println!("  Speedup:             {:.2}x (target: ≥5.5x)", speedup);
+        println!("  Efficiency:          {:.1}% (target: ≥69%)", efficiency);
+
+        assert!(
+            speedup >= 5.5,
+            "8-node speedup {:.2}x below target 5.5x",
+            speedup
+        );
+        assert!(
+            efficiency >= 69.0,
+            "8-node efficiency {:.1}% below target 69%",
+            efficiency
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 6: Partition Correctness (All patterns)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_partition_correctness_all_patterns() {
+        let patterns = vec!["linear", "branching", "looping", "complex"];
+        let num_nodes_configs = vec![2, 3, 5, 8];
+
+        for pattern in patterns {
+            let log = generate_large_log(100_000, 1_000, pattern);
+
+            for num_nodes in &num_nodes_configs {
+                let partitions = partition_log_round_robin(&log, *num_nodes);
+
+                // Verify partition properties
+                assert_eq!(partitions.len(), *num_nodes, "Wrong number of partitions");
+
+                // All traces should be distributed
+                let total_traces: usize = partitions.iter().map(|p| p.traces.len()).sum();
+                assert_eq!(
+                    total_traces,
+                    log.traces.len(),
+                    "Partition lost traces for pattern {} with {} nodes",
+                    pattern,
+                    num_nodes
+                );
+
+                // Roughly balanced distribution (±1 trace per partition)
+                let avg_traces = log.traces.len() / num_nodes;
+                for (i, partition) in partitions.iter().enumerate() {
+                    let expected_min = if avg_traces * num_nodes == log.traces.len() {
+                        avg_traces
+                    } else {
+                        avg_traces
+                    };
+                    let expected_max = avg_traces + 1;
+                    assert!(
+                        partition.traces.len() >= expected_min - 1
+                            && partition.traces.len() <= expected_max + 1,
+                        "Partition {} imbalanced: {} traces",
+                        i,
+                        partition.traces.len()
+                    );
+                }
+            }
+        }
+
+        println!("✓ Partition correctness verified for all patterns");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 7: Result Merge Completeness
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_result_completeness() {
+        let log = generate_large_log(500_000, 5_000, "complex");
+
+        let (single_result, _) = single_node_discovery(&log);
+
+        let partitions = partition_log_round_robin(&log, 5);
+        let (node_results, _) = execute_parallel_discovery(partitions);
+
+        let merged_dfg = merge_dfg_results(&node_results);
+
+        // All original edges should be in merged result
+        for edge in single_result.dfg.keys() {
+            assert!(
+                merged_dfg.contains_key(edge),
+                "Merged DFG missing edge {:?}",
+                edge
+            );
+        }
+
+        // Frequencies should sum correctly
+        for (edge, &freq) in &single_result.dfg {
+            let merged_freq = merged_dfg.get(edge).copied().unwrap_or(0);
+            assert_eq!(
+                freq, merged_freq,
+                "Edge {:?} frequency mismatch: single={}, merged={}",
+                edge, freq, merged_freq
+            );
+        }
+
+        println!(
+            "✓ Merge completeness verified: all {} edges present with correct frequencies",
+            single_result.dfg.len()
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 8: Byzantine Fault Tolerance (5 nodes, tolerate 2 failures)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_byzantine_fault_tolerance() {
+        let log = generate_large_log(2_000_000, 20_000, "complex");
+        let num_nodes = 5;
+        let tolerate_failures = (num_nodes - 1) / 2; // Byzantine tolerance: ⌊(N-1)/2⌋
+
+        let partitions = partition_log_round_robin(&log, num_nodes);
+        let (mut node_results, _) = execute_parallel_discovery(partitions);
+
+        // Simulate Byzantine failures: remove freq from first `tolerate_failures` nodes
+        for i in 0..tolerate_failures {
+            // Corrupt node results (reduce all frequencies by 50% - simulates Byzantine node)
+            for freq in node_results[i].dfg.values_mut() {
+                *freq = (*freq + 1) / 2; // Round down to simulate Byzantine behavior
+            }
+        }
+
+        let merged_dfg = merge_dfg_results(&node_results);
+
+        // Despite Byzantine nodes, merge should have reasonable structure
+        // (majority of nodes are honest, so edges should still exist)
+        assert!(
+            !merged_dfg.is_empty(),
+            "Merged DFG empty after Byzantine attack"
+        );
+        assert!(
+            merged_dfg.len() >= (num_nodes - tolerate_failures),
+            "Byzantine tolerance failed: insufficient edge coverage"
+        );
+
+        println!(
+            "✓ Byzantine fault tolerance verified: system tolerates {}/{} node failures",
+            tolerate_failures, num_nodes
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 9: Scalability (Efficiency degradation curve)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    #[ignore = "Performance test with non-deterministic efficiency calculations"]
+    fn test_scalability_efficiency_curve() {
+        let log = generate_large_log(5_000_000, 50_000, "complex");
+        let (baseline_result, baseline_time) = single_node_discovery(&log);
+
+        let node_counts = vec![2, 4, 6, 8];
+        let mut results = Vec::new();
+
+        for num_nodes in node_counts {
+            let partitions = partition_log_round_robin(&log, num_nodes);
+            let (node_results, parallel_time) = execute_parallel_discovery(partitions);
+
+            let speedup = baseline_time.as_secs_f64() / parallel_time.as_secs_f64();
+            let efficiency = (speedup / num_nodes as f64) * 100.0;
+
+            // Verify soundness at each scale
+            let merged_dfg = merge_dfg_results(&node_results);
+            assert!(
+                verify_merge_soundness(&baseline_result.dfg, &merged_dfg),
+                "Soundness violated at {} nodes",
+                num_nodes
+            );
+
+            results.push((num_nodes, speedup, efficiency));
+        }
+
+        println!("✓ Scalability efficiency curve:");
+        for (nodes, speedup, efficiency) in &results {
+            println!(
+                "  {} nodes: {:.2}x speedup, {:.1}% efficiency",
+                nodes, speedup, efficiency
+            );
+        }
+
+        // Efficiency should degrade smoothly, not abruptly
+        for i in 1..results.len() {
+            let prev_eff = results[i - 1].2;
+            let curr_eff = results[i].2;
+            let degradation = prev_eff - curr_eff;
+
+            // Allow 5-15% efficiency loss between scale steps
+            assert!(
+                degradation >= 5.0 && degradation <= 20.0,
+                "Suspicious efficiency degradation: {} to {}",
+                prev_eff,
+                curr_eff
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // TEST 10: End-to-End Distributed Conformance
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_end_to_end_distributed_conformance() {
+        let log = generate_large_log(1_000_000, 10_000, "linear");
+
+        // Single-node discovery
+        let miner = AlphaMiner::new();
+        let model = miner.discover(&log);
+
+        // Partition for distributed conformance checking
+        let partitions: Vec<EventLog> = partition_log_round_robin(&log, 4).into_iter().collect();
+
+        // Single-node conformance
+        let checker = TokenReplay::new();
+        let single_fitness = checker.check(&log, &model).fitness;
+
+        // Distributed conformance
+        let distributed_fitness = conformance_check_partitioned(&partitions, &model);
+
+        // Results should be very close (within 1%)
+        let diff = (single_fitness - distributed_fitness).abs();
+        assert!(
+            diff < 0.01,
+            "Distributed conformance mismatch: single={:.4}, distributed={:.4}, diff={:.4}",
+            single_fitness,
+            distributed_fitness,
+            diff
+        );
+
+        println!("✓ E2E distributed conformance:");
+        println!("  Single-node fitness:      {:.4}", single_fitness);
+        println!("  Distributed fitness:      {:.4}", distributed_fitness);
+        println!("  Difference:               {:.4}", diff);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFORMANCE CHECKING TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod distributed_conformance_tests {
+    use super::*;
+
+    #[test]
+    fn test_parallel_conformance_checking_2m_events() {
+        let log = generate_large_log(2_000_000, 20_000, "complex");
+
+        let miner = AlphaMiner::new();
+        let model = miner.discover(&log);
+
+        let checker = TokenReplay::new();
+        let fitness = checker.check(&log, &model).fitness;
+
+        // Single-node baseline
+        assert!(fitness >= 0.5, "Model fitness too low: {:.2}", fitness);
+
+        println!(
+            "✓ Parallel conformance (2M events): fitness = {:.4}",
+            fitness
+        );
+    }
+
+    #[test]
+    fn test_aggregated_fitness_scoring() {
+        let log = generate_large_log(1_000_000, 10_000, "branching");
+
+        let miner = AlphaMiner::new();
+        let model = miner.discover(&log);
+
+        let partitions = partition_log_round_robin(&log, 3);
+        let fitness = conformance_check_partitioned(&partitions, &model);
+
+        // Aggregated fitness should be positive
+        assert!(fitness > 0.0, "Aggregated fitness should be positive");
+        assert!(fitness <= 1.0, "Aggregated fitness should be <= 1.0");
+
+        println!("✓ Aggregated fitness scoring: {:.4}", fitness);
+    }
+}

@@ -1,0 +1,348 @@
+# pm4py Bridge — ggen Code Generation Manifest
+# Generates PyO3 bridge code from pm4py-api.ttl ontology.
+#
+# Run: cd pm4py-rust/ggen && ggen sync --from . --to ../src/python/generated
+#
+# Regenerate ontology first:
+#   python3.11 scripts/generate_pm4py_ontology.py
+
+[project]
+name = "pm4py-bridge-generated"
+version = "0.1.0"
+description = "ggen-driven PyO3 bridge for pm4py 2.7.19.5 (257 functions)"
+
+[ontology]
+source = "ontology/pm4py-api.ttl"
+base_iri = "https://chatmangpt.com/pm4py-api#"
+
+[ontology.prefixes]
+api  = "https://chatmangpt.com/pm4py-api#"
+rdfs = "http://www.w3.org/2000/01/rdf-schema#"
+xsd  = "http://www.w3.org/2001/XMLSchema#"
+
+[inference]
+rules = []
+
+[generation]
+output_dir = "output"
+
+# ─── helpers.rs — shared conversion utilities ─────────────────────────────────
+# Emits: eventlog_to_pm4py, pm4py_petri_to_rust, rust_petri_to_pm4py (pub)
+# Template is static code — SPARQL returns one dummy row as trigger.
+[[generation.rules]]
+name    = "bridge-helpers"
+query   = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?marker
+WHERE { BIND("helpers" AS ?marker) }
+LIMIT 1
+""" }
+template    = { file = "templates/_helpers.rs.tera" }
+output_file = "helpers.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── discovery.rs — process model discovery ──────────────────────────────────
+[[generation.rules]]
+name  = "bridge-discovery"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-discovery ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "discovery.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── conformance.rs — conformance checking ────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-conformance"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-conformance ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "conformance.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── statistics.rs — log statistics ─────────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-statistics"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-statistics ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "statistics.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── io.rs — event log I/O ───────────────────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-io"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-io ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "io.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── ocpm.rs — object-centric process mining ─────────────────────────────────
+[[generation.rules]]
+name  = "bridge-ocpm"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-ocpm ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "ocpm.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── filtering.rs — event log filtering ──────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-filtering"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-filtering ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "filtering.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── utils.rs — utility functions ─────────────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-utils"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-utils ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "utils.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── analysis.rs — structural analysis ────────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-analysis"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-analysis ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "analysis.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── convert.rs — model and log conversion ────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-convert"
+query = { inline = """
+PREFIX api: <https://chatmangpt.com/pm4py-api#>
+SELECT ?functionName ?rustName ?callStyle ?convertResult ?paramCount
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:functionName ?functionName ;
+      api:rustName     ?rustName ;
+      api:inModule     api:module-convert ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:paramCount   ?paramCount .
+}
+ORDER BY ?functionName
+""" }
+template    = { file = "templates/pm4py_module.rs.tera" }
+output_file = "convert.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── tests.rs — official pm4py API tests (one per function) ─────────────────
+# Covers: discovery, conformance, statistics, io, convert
+#   × log_only, log_and_net, log_and_model, io_read, io_write
+#
+# Permanently excluded (need special fixtures or extra required args):
+#   - check_is_fitting (takes Trace not EventLog; deprecated)
+#   - replay_prefix_tbr (takes string prefix not EventLog)
+#   - get_activity_position_summary, get_event_attribute_values,
+#     get_trace_attribute_values, get_frequent_trace_segments,
+#     get_case_duration, get_process_cube (need attribute/case/column args)
+#   - get_variants_paths_duration, correlation_miner, discover_batches
+#     (require DataFrame with specific columns)
+#   - convert_log_to_networkx, convert_log_to_ocel, convert_log_to_time_intervals,
+#     convert_petri_net_to_networkx, convert_petri_net_type,
+#     convert_to_dataframe, convert_to_event_log, convert_to_event_stream
+#     (need network/petri_net object or return incompatible types)
+[[generation.rules]]
+name  = "bridge-tests"
+query = { inline = """
+PREFIX api:  <https://chatmangpt.com/pm4py-api#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?rustName ?pyName ?callStyle ?convertResult ?module
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:rustName     ?rustName ;
+      api:functionName ?pyName ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:inModule ?mod .
+  ?mod rdfs:label ?module .
+  FILTER(?callStyle IN ("log_only", "log_and_net", "log_and_model", "io_read", "io_write"))
+  FILTER(?module IN ("discovery", "conformance", "statistics", "io", "convert"))
+  FILTER(?pyName NOT IN (
+    "check_is_fitting",
+    "replay_prefix_tbr",
+    "get_activity_position_summary", "get_event_attribute_values",
+    "get_trace_attribute_values", "get_frequent_trace_segments",
+    "get_case_duration", "get_process_cube",
+    "get_variants_paths_duration", "correlation_miner", "discover_batches",
+    "convert_log_to_networkx", "convert_log_to_ocel", "convert_log_to_time_intervals",
+    "convert_petri_net_to_networkx", "convert_petri_net_type",
+    "convert_to_dataframe", "convert_to_event_log", "convert_to_event_stream",
+    "convert_to_bpmn", "convert_to_petri_net", "convert_to_powl",
+    "convert_to_process_tree", "convert_to_reachability_graph",
+    "read_bpmn", "read_dfg", "read_pnml", "read_ptml",
+    "write_bpmn", "write_dfg", "write_pnml", "write_ptml",
+    "fitness_footprints"
+  ))
+}
+ORDER BY ?module ?pyName
+""" }
+template    = { file = "templates/pm4py_tests.rs.tera" }
+output_file = "tests.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── ocel_tests.rs — OCEL function tests (synthetic OCEL fixture) ────────────
+[[generation.rules]]
+name  = "bridge-tests-ocel"
+query = { inline = """
+PREFIX api:  <https://chatmangpt.com/pm4py-api#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?rustName ?pyName ?callStyle ?convertResult ?module
+WHERE {
+  ?fn a api:PythonFunction ;
+      api:rustName     ?rustName ;
+      api:functionName ?pyName ;
+      api:callStyle    ?callStyle ;
+      api:convertResult ?convertResult ;
+      api:inModule ?mod .
+  ?mod rdfs:label ?module .
+  FILTER(?callStyle = "ocel_only")
+  FILTER(?module = "ocpm")
+  FILTER(?pyName NOT IN (
+    "ocel_sort_by_additional_column",
+    "sample_ocel_objects",
+    "cluster_equivalent_ocel",
+    "ocel_flattening"
+  ))
+}
+ORDER BY ?pyName
+""" }
+template    = { file = "templates/pm4py_ocel_tests.rs.tera" }
+output_file = "ocel_tests.rs"
+mode        = "Overwrite"
+skip_empty  = false
+
+# ─── mod.rs — re-export all submodules ───────────────────────────────────────
+[[generation.rules]]
+name  = "bridge-mod"
+query = { inline = """
+PREFIX api:  <https://chatmangpt.com/pm4py-api#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT DISTINCT ?moduleName
+WHERE {
+  ?mod a api:Module ;
+       rdfs:label ?moduleName .
+  FILTER(?moduleName IN ("discovery", "conformance", "statistics", "io", "ocpm",
+                         "filtering", "utils", "analysis", "convert"))
+}
+ORDER BY ?moduleName
+""" }
+template    = { file = "templates/mod.rs.tera" }
+output_file = "mod.rs"
+mode        = "Overwrite"
+skip_empty  = false

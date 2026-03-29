@@ -1,0 +1,230 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pm4py-api
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    version: v1
+    environment: production
+  annotations:
+    description: "Process mining API server - pm4py-rust implementation"
+    owner: "Sean Chatman"
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Zero-downtime rolling updates
+  selector:
+    matchLabels:
+      app: pm4py-api
+      tier: api
+  template:
+    metadata:
+      name: pm4py-api-pod
+      namespace: pm4py-prod
+      labels:
+        app: pm4py-api
+        tier: api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Security: don't run as root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Pod disruption budget for high availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - pm4py-api
+                topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - amd64
+
+      # Service account for RBAC
+      serviceAccountName: pm4py-api
+      automountServiceAccountToken: true
+
+      # Image pull secrets (if using private registry)
+      imagePullSecrets:
+        - name: docker-registry-secret
+
+      # Init containers for setup
+      initContainers:
+        - name: setup-directories
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /var/pm4py/data /var/pm4py/logs
+              chmod 750 /var/pm4py/data /var/pm4py/logs
+          volumeMounts:
+            - name: data-volume
+              mountPath: /var/pm4py/data
+            - name: logs-volume
+              mountPath: /var/pm4py/logs
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+
+      containers:
+        - name: pm4py-api
+          image: pm4py-rust:latest
+          imagePullPolicy: IfNotPresent
+
+          # Port configuration
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Environment variables
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: RUST_BACKTRACE
+              value: "1"
+            - name: PM4PY_DATA_DIR
+              value: "/var/pm4py/data"
+            - name: PM4PY_LOG_DIR
+              value: "/var/pm4py/logs"
+            - name: PORT
+              value: "8080"
+            - name: ENABLE_METRICS
+              value: "true"
+            - name: ENABLE_TRACING
+              value: "true"
+            - name: LOG_LEVEL
+              value: "info"
+
+          # Security context per container
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+
+          # Resource requests and limits
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2048Mi"
+
+          # Liveness probe: restart if unhealthy
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Readiness probe: remove from load balancer if not ready
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+
+          # Startup probe: pod is ready after startup completes
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 0
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 15
+
+          # Volume mounts
+          volumeMounts:
+            - name: data-volume
+              mountPath: /var/pm4py/data
+              readOnly: false
+            - name: logs-volume
+              mountPath: /var/pm4py/logs
+              readOnly: false
+            - name: tmp
+              mountPath: /tmp
+            - name: var-run
+              mountPath: /var/run
+
+          # Lifecycle hooks
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 15 && kill -TERM 1 || true
+
+      # Volumes
+      volumes:
+        - name: data-volume
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: logs-volume
+          emptyDir:
+            sizeLimit: 5Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: var-run
+          emptyDir:
+            sizeLimit: 500Mi
+
+      # Termination grace period for graceful shutdown
+      terminationGracePeriodSeconds: 30
+
+      # DNS configuration
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        ndots: 2
+        searches:
+          - pm4py-prod.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local

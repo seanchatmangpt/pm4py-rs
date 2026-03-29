@@ -1,0 +1,20 @@
+# Cargo configuration for PM4Py Rust
+# See: https://doc.rust-lang.org/cargo/reference/config.html
+
+[build]
+# Use reasonable parallelism for builds (commented out to use defaults)
+# jobs = 4
+
+# Control LTO settings per profile in Cargo.toml
+# (see profiles section there)
+
+[term]
+# Use colors in output
+color = "auto"
+
+# Verbose logging for debugging
+verbose = false
+
+[net]
+# Use git cli instead of built-in
+git-fetch-with-cli = true

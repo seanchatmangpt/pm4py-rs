@@ -1,0 +1,182 @@
+#![allow(dropping_references, clippy::redundant_closure_call)]
+//! pm4py official API tests — auto-generated, DO NOT EDIT
+//! Source: pm4py-rust/ggen/ontology/pm4py-api.ttl
+//! Regenerate: cd pm4py-rust/ggen && /Users/sac/ggen/target/release/ggen sync --manifest ggen.toml
+//!
+//! Each test mirrors a test from the official pm4py Python test suite.
+//! Skip convention: pm4py_available() guard — passes in CI without Python.
+
+#![cfg(test)]
+#![allow(deprecated, dead_code, unused_variables, unused_imports)]
+
+use pm4py::log::{EventLog, Trace, Event};
+use pm4py::models::{PetriNet, Place, Transition, Arc};
+use chrono::Utc;
+use tempfile::NamedTempFile;
+
+// ── Runtime guard ────────────────────────────────────────────────────────────
+
+#[allow(deprecated)]
+fn pm4py_available() -> bool {
+    pyo3::prepare_freethreaded_python();
+    pyo3::Python::with_gil(|py| {
+        py.import("pm4py").is_ok() && py.import("pandas").is_ok()
+    })
+}
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+/// Two-activity log: A → B (single trace). Minimal fixture for all log_only tests.
+fn two_activity_log() -> EventLog {
+    let mut log = EventLog::new();
+    let mut trace = Trace::new("case1");
+    trace.events.push(Event::new("A", Utc::now()));
+    trace.events.push(Event::new("B", Utc::now()));
+    log.traces.push(trace);
+    log
+}
+
+/// Running-example log — 6 variants, 13 traces. Used for realistic conformance tests.
+fn running_example_log() -> EventLog {
+    pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::io::call_read_xes(py, "test_data/running-example.xes")
+    }).unwrap_or_else(|_| two_activity_log())
+}
+
+/// Simple A→B Petri net with one token in start place.
+fn ab_petri_net() -> PetriNet {
+    let mut net = PetriNet::new();
+    let mut p_start = Place::new("start");
+    p_start.id = "start".to_string();
+    p_start.initial_marking = 1;
+    let mut p_mid = Place::new("mid");
+    p_mid.id = "mid".to_string();
+    let mut p_end = Place::new("end");
+    p_end.id = "end".to_string();
+    net.add_place(p_start);
+    net.add_place(p_mid);
+    net.add_place(p_end);
+    net.set_initial_place("start".to_string());
+    net.set_final_place("end".to_string());
+    let mut t_a = Transition::new("t_A");
+    t_a.id = "t_A".to_string();
+    t_a = t_a.with_label("A".to_string());
+    let mut t_b = Transition::new("t_B");
+    t_b.id = "t_B".to_string();
+    t_b = t_b.with_label("B".to_string());
+    net.add_transition(t_a);
+    net.add_transition(t_b);
+    net.add_arc(Arc::new("start", "t_A").with_weight(1));
+    net.add_arc(Arc::new("t_A", "mid").with_weight(1));
+    net.add_arc(Arc::new("mid", "t_B").with_weight(1));
+    net.add_arc(Arc::new("t_B", "end").with_weight(1));
+    net
+}
+
+// ── Test data paths ───────────────────────────────────────────────────────────
+
+const XES_PATH:  &str = "test_data/running-example.xes";
+const PNML_PATH: &str = "test_data/running-example.pnml";
+const PTML_PATH: &str = "test_data/running-example.ptml";
+const BPMN_PATH: &str = "test_data/running-example.bpmn";
+const DFG_PATH:  &str = "test_data/running-example.dfg";
+
+// ── Generated tests — one per pm4py API function ─────────────────────────────
+
+{% for row in sparql_results %}
+{% set fn_name    = row["?rustName"]      | default(value="call_unknown") %}
+{% set py_name    = row["?pyName"]        | default(value="unknown") %}
+{% set call_style = row["?callStyle"]     | default(value="log_only") %}
+{% set convert    = row["?convertResult"] | default(value="unit") %}
+{% set module     = row["?module"]        | default(value="discovery") %}
+
+#[test]
+fn {{ fn_name }}_official() {
+    if !pm4py_available() {
+        eprintln!("SKIP {{ fn_name }}_official: pm4py not available");
+        return;
+    }
+{%- if call_style == "log_and_net" %}
+    let log = two_activity_log();
+    let net = ab_petri_net();
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, &log, &net)
+    });
+{%- elif call_style == "log_and_model" %}
+    let log = two_activity_log();
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, &log)
+    });
+{%- elif call_style == "io_write" %}
+{%- if py_name is containing("ocel") %}
+    // SKIP: OCEL write functions require an OCEL object, not an EventLog
+    return;
+    #[allow(unreachable_code)]
+    let result: Result<(), ()> = Ok(());
+{%- else %}
+    let log = two_activity_log();
+    let tmp = tempfile::NamedTempFile::new().expect("tmp file must be created");
+    let path = tmp.path().to_str().expect("path must be valid UTF-8");
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, &log, path)
+    });
+{%- endif %}
+{%- elif call_style == "io_read" %}
+{%- if py_name is containing("pnml") %}
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, PNML_PATH)
+    });
+{%- elif py_name is containing("ptml") %}
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, PTML_PATH)
+    });
+{%- elif py_name is containing("bpmn") %}
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, BPMN_PATH)
+    });
+{%- elif py_name is containing("dfg") %}
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, DFG_PATH)
+    });
+{%- elif py_name is containing("ocel") %}
+    // SKIP: no OCEL test fixture available
+    return;
+    #[allow(unreachable_code)]
+    let result: Result<(), ()> = Ok(());
+{%- else %}
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, XES_PATH)
+    });
+{%- endif %}
+{%- else %}
+    let log = two_activity_log();
+    let result = pyo3::Python::with_gil(|py| {
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, &log)
+    });
+{%- endif %}
+{%- if convert == "petri_net_triple" %}
+    let discovered = result.expect("{{ py_name }} failed");
+    assert!(!discovered.places.is_empty(),
+        "{{ py_name }}: PetriNet must have places");
+    assert!(!discovered.transitions.is_empty(),
+        "{{ py_name }}: PetriNet must have transitions");
+{%- elif convert == "f64" or convert == "fitness_dict" %}
+    let score = result.expect("{{ py_name }} failed");
+    assert!(score >= 0.0,
+        "{{ py_name }}: score must be non-negative, got {score}");
+{%- elif convert == "dict" %}
+    result.expect("{{ py_name }} failed");
+{%- elif convert == "list_dict" %}
+    let avg = result.expect("{{ py_name }} failed");
+    assert!((0.0..=1.0).contains(&avg),
+        "{{ py_name }}: avg must be in [0,1], got {avg}");
+{%- elif convert == "event_log" %}
+    result.expect("{{ py_name }} read failed");
+{%- elif convert == "string" %}
+    let s = result.expect("{{ py_name }} failed");
+    let _ = s;
+{%- else %}
+    result.expect("{{ py_name }} failed");
+{%- endif %}
+}
+{% endfor %}

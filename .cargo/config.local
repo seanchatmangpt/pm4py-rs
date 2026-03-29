@@ -1,0 +1,26 @@
+# pm4py-rust: Development build optimization
+# Created 2026-03-25 for faster iteration cycles
+# This config.local overrides config.toml for local development only
+
+[build]
+# Maximum parallelism for dev builds (uses all available cores)
+jobs = 0
+
+[profile.dev]
+# Instant dev builds: no optimization, direct compilation
+opt-level = 0
+lto = false
+codegen-units = 256
+incremental = true
+debug = true
+
+[profile.test]
+# Fast test builds: minimal optimization + parallel codegen
+opt-level = 1
+lto = false
+codegen-units = 128
+incremental = true
+debug = true
+
+# WARNING: Release builds on this machine still use config.toml profile.release
+# For fast release during iteration, use: cargo build --release --config profile.release.opt-level=2

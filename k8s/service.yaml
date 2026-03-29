@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pm4py-api
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    version: v1
+  annotations:
+    description: "LoadBalancer service for pm4py-api"
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  # Service type: LoadBalancer for external access
+  type: LoadBalancer
+
+  # Session affinity: client IP-based routing
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 hours
+
+  # Port configuration
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+      nodePort: 30080
+
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 8080
+      nodePort: 30443
+
+  # Selector
+  selector:
+    app: pm4py-api
+    tier: api
+
+  # Load balancer configuration
+  loadBalancerSourceRanges: []  # Allow from all sources (restrict as needed)
+
+  # Health check configuration
+  healthCheckNodePort: 30000
+  externalTrafficPolicy: Local  # Preserve source IP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pm4py-api-headless
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    version: v1
+  annotations:
+    description: "Headless service for pm4py-api (DNS-based discovery)"
+spec:
+  # Headless service for StatefulSet compatibility and DNS discovery
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: pm4py-api
+    tier: api
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pm4py-api-internal
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    version: v1
+  annotations:
+    description: "Internal ClusterIP service for pm4py-api (cluster-only)"
+spec:
+  # Internal ClusterIP service for pod-to-pod communication
+  type: ClusterIP
+  sessionAffinity: None
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: metrics
+      protocol: TCP
+      port: 9090
+      targetPort: 9090
+  selector:
+    app: pm4py-api
+    tier: api

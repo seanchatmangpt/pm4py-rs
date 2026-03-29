@@ -1,0 +1,43 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pm4py-api-pdb
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "Pod Disruption Budget - maintain availability during upgrades"
+spec:
+  # Minimum replicas available during voluntary disruptions
+  minAvailable: 3
+
+  # Selector for target pods
+  selector:
+    matchLabels:
+      app: pm4py-api
+      tier: api
+
+  # Allow disruptions (drain, rolling updates, etc.)
+  # This ensures Kubernetes won't evict pods if it would violate minAvailable
+  unhealthyPodEvictionPolicy: IfHealthyBudget
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pm4py-api-pdb-strict
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    variant: strict
+  annotations:
+    description: "Strict PDB - allow only 1 disruption at a time"
+spec:
+  # Maximum pods that can be disrupted simultaneously
+  maxUnavailable: 1
+
+  selector:
+    matchLabels:
+      app: pm4py-api
+
+  unhealthyPodEvictionPolicy: AlwaysAllow

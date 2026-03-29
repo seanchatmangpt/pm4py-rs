@@ -1,0 +1,322 @@
+use std::collections::HashMap;
+use std::time::SystemTime;
+
+#[derive(Debug, Clone)]
+struct Trace {
+    trace_id: String,
+    span_id: String,
+    parent_id: String,
+    flags: String,
+    start_time: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+struct Span {
+    trace_id: String,
+    span_id: String,
+    parent_id: String,
+    name: String,
+    start_time: SystemTime,
+    end_time: Option<SystemTime>,
+    duration_ms: u64,
+    status: String,
+    attributes: HashMap<String, String>,
+    service: String,
+}
+
+#[test]
+fn test_extract_traceparent() {
+    let mut headers = HashMap::new();
+    headers.insert(
+        "traceparent".to_string(),
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
+    );
+
+    let trace = extract_traceparent(&headers);
+
+    assert_eq!(trace.trace_id, "0af7651916cd43dd8448eb211c80319c");
+    assert_eq!(trace.span_id, "b7ad6b7169203331");
+    assert_eq!(trace.flags, "01");
+}
+
+#[test]
+fn test_extract_traceparent_missing() {
+    let headers = HashMap::new();
+
+    let trace = extract_traceparent(&headers);
+
+    assert_eq!(trace.trace_id.len(), 32);
+    assert_eq!(trace.span_id.len(), 16);
+}
+
+#[test]
+fn test_create_span() {
+    let parent = Trace {
+        trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
+        span_id: "b7ad6b7169203331".to_string(),
+        parent_id: "".to_string(),
+        flags: "01".to_string(),
+        start_time: SystemTime::now(),
+    };
+
+    let mut attrs = HashMap::new();
+    attrs.insert("service".to_string(), "rust".to_string());
+
+    let span = create_span(&parent, "process_mining", attrs);
+
+    assert_eq!(span.trace_id, parent.trace_id);
+    assert_eq!(span.parent_id, parent.span_id);
+    assert_eq!(span.name, "process_mining");
+    assert_eq!(span.service, "rust");
+}
+
+#[test]
+fn test_end_span() {
+    let parent = Trace {
+        trace_id: "abc1234567890def1234567890abcdef".to_string(),
+        span_id: "1234567890abcdef".to_string(),
+        parent_id: "".to_string(),
+        flags: "01".to_string(),
+        start_time: SystemTime::now(),
+    };
+
+    let mut span = create_span(&parent, "operation", HashMap::new());
+
+    end_span(&mut span, "ok");
+
+    assert!(span.duration_ms > 0);
+    assert_eq!(span.status, "ok");
+    assert!(span.end_time.is_some());
+}
+
+#[test]
+fn test_traceparent_propagation() {
+    // Service A receives traceparent
+    let mut headers_a = HashMap::new();
+    headers_a.insert(
+        "traceparent".to_string(),
+        "00-abc1234567890def1234567890abcdef-1234567890abcdef-01".to_string(),
+    );
+
+    let trace_a = extract_traceparent(&headers_a);
+
+    // Service A creates span
+    let span_a = create_span(&trace_a, "service_rust", HashMap::new());
+
+    // Service A propagates to downstream
+    let propagated = encode_traceparent(&span_a);
+
+    // Service B receives propagated traceparent
+    let mut headers_b = HashMap::new();
+    headers_b.insert("traceparent".to_string(), propagated);
+
+    let trace_b = extract_traceparent(&headers_b);
+
+    // Service B creates span
+    let span_b = create_span(&trace_b, "service_downstream", HashMap::new());
+
+    // All should share same trace_id
+    assert_eq!(trace_a.trace_id, trace_b.trace_id);
+    assert_eq!(span_a.trace_id, span_b.trace_id);
+}
+
+#[test]
+fn test_span_creation_on_service_boundaries() {
+    let trace = Trace {
+        trace_id: "fedcba9876543210fedcba9876543210".to_string(),
+        span_id: "fedcba9876543210".to_string(),
+        parent_id: "".to_string(),
+        flags: "01".to_string(),
+        start_time: SystemTime::now(),
+    };
+
+    // Entry boundary
+    let mut attrs = HashMap::new();
+    attrs.insert("service".to_string(), "rust".to_string());
+    attrs.insert("operation".to_string(), "process_mining".to_string());
+
+    let span = create_span(&trace, "boundary_entry", attrs);
+
+    assert_eq!(span.trace_id, trace.trace_id);
+    assert_eq!(span.parent_id, trace.span_id);
+    assert_eq!(span.name, "boundary_entry");
+}
+
+#[test]
+fn test_trace_reconstruction() {
+    let trace_id = "11111111111111111111111111111111";
+    let now = SystemTime::now();
+
+    let span_a = Span {
+        trace_id: trace_id.to_string(),
+        span_id: "aaaaaaaaaaaaaaaa".to_string(),
+        parent_id: "".to_string(),
+        name: "service_rust".to_string(),
+        start_time: now,
+        end_time: None,
+        duration_ms: 0,
+        status: "running".to_string(),
+        attributes: HashMap::new(),
+        service: "rust".to_string(),
+    };
+
+    let span_b = Span {
+        trace_id: trace_id.to_string(),
+        span_id: "bbbbbbbbbbbbbbbb".to_string(),
+        parent_id: span_a.span_id.clone(),
+        name: "service_downstream".to_string(),
+        start_time: now,
+        end_time: None,
+        duration_ms: 0,
+        status: "running".to_string(),
+        attributes: HashMap::new(),
+        service: "downstream".to_string(),
+    };
+
+    let span_c = Span {
+        trace_id: trace_id.to_string(),
+        span_id: "cccccccccccccccc".to_string(),
+        parent_id: span_b.span_id.clone(),
+        name: "service_final".to_string(),
+        start_time: now,
+        end_time: None,
+        duration_ms: 0,
+        status: "running".to_string(),
+        attributes: HashMap::new(),
+        service: "final".to_string(),
+    };
+
+    let spans = vec![span_a, span_b, span_c];
+
+    let reconstructed = reconstruct_trace(&spans);
+
+    assert_eq!(reconstructed.trace_id, trace_id);
+    assert_eq!(reconstructed.spans.len(), 3);
+    assert_eq!(reconstructed.spans[0].name, "service_rust");
+}
+
+#[test]
+fn test_record_attribute() {
+    let mut span = Span {
+        trace_id: "ffffffffffffffffffffffffffffffff".to_string(),
+        span_id: "ffffffffffffffff".to_string(),
+        parent_id: "".to_string(),
+        name: "test".to_string(),
+        start_time: SystemTime::now(),
+        end_time: None,
+        duration_ms: 0,
+        status: "running".to_string(),
+        attributes: HashMap::new(),
+        service: "rust".to_string(),
+    };
+
+    record_attribute(&mut span, "process_id", "proc_123");
+
+    assert_eq!(span.attributes.get("process_id"), Some(&"proc_123".to_string()));
+}
+
+#[test]
+fn test_encode_traceparent() {
+    let span = Span {
+        trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
+        span_id: "b7ad6b7169203331".to_string(),
+        parent_id: "".to_string(),
+        name: "test".to_string(),
+        start_time: SystemTime::now(),
+        end_time: None,
+        duration_ms: 0,
+        status: "ok".to_string(),
+        attributes: HashMap::new(),
+        service: "rust".to_string(),
+    };
+
+    let encoded = encode_traceparent(&span);
+
+    assert_eq!(
+        encoded,
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    );
+}
+
+// Helper functions
+
+fn extract_traceparent(headers: &HashMap<String, String>) -> Trace {
+    if let Some(tp) = headers.get("traceparent") {
+        let parts: Vec<&str> = tp.split('-').collect();
+        if parts.len() == 4 {
+            return Trace {
+                trace_id: parts[1].to_string(),
+                span_id: parts[2].to_string(),
+                parent_id: "".to_string(),
+                flags: parts[3].to_string(),
+                start_time: SystemTime::now(),
+            };
+        }
+    }
+
+    // Generate new trace
+    Trace {
+        trace_id: generate_id(32),
+        span_id: generate_id(16),
+        parent_id: "".to_string(),
+        flags: "01".to_string(),
+        start_time: SystemTime::now(),
+    }
+}
+
+fn create_span(parent: &Trace, name: &str, attrs: HashMap<String, String>) -> Span {
+    Span {
+        trace_id: parent.trace_id.clone(),
+        span_id: generate_id(16),
+        parent_id: parent.span_id.clone(),
+        name: name.to_string(),
+        start_time: SystemTime::now(),
+        end_time: None,
+        duration_ms: 0,
+        status: "running".to_string(),
+        attributes: attrs,
+        service: "rust".to_string(),
+    }
+}
+
+fn end_span(span: &mut Span, status: &str) {
+    span.end_time = Some(SystemTime::now());
+    span.duration_ms = span
+        .end_time
+        .unwrap()
+        .duration_since(span.start_time)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    span.status = status.to_string();
+}
+
+fn encode_traceparent(span: &Span) -> String {
+    format!("00-{}-{}-01", span.trace_id, span.span_id)
+}
+
+struct ReconstructedTrace {
+    trace_id: String,
+    spans: Vec<Span>,
+}
+
+fn reconstruct_trace(spans: &[Span]) -> ReconstructedTrace {
+    ReconstructedTrace {
+        trace_id: if spans.is_empty() {
+            String::new()
+        } else {
+            spans[0].trace_id.clone()
+        },
+        spans: spans.to_vec(),
+    }
+}
+
+fn record_attribute(span: &mut Span, key: &str, value: &str) {
+    span.attributes.insert(key.to_string(), value.to_string());
+}
+
+fn generate_id(length: usize) -> String {
+    let chars = "0123456789abcdef";
+    (0..length)
+        .map(|i| chars.chars().nth(i % chars.len()).unwrap())
+        .collect()
+}

@@ -1,0 +1,689 @@
+//! INTEGRATION TESTS: pm4py-rust with Canopy demo data
+//!
+//! Chicago TDD: NO MOCKS. All tests use REAL data from Canopy's workspace protocol.
+//!
+//! Data sources (real CSVs at canopy/priv/demo_data/):
+//! - invoice_processing_events.csv: Invoice approval workflow (425KB)
+//! - customer_onboarding_events.csv: Customer onboarding process (385KB)
+//! - compliance_reporting_events.csv: SOC2 compliance reporting (294KB)
+
+use chrono::{Duration, Utc};
+use pm4py::conformance::{AlignmentChecker, TokenReplay};
+use pm4py::discovery::{
+    AlphaMiner, DFGMiner, HeuristicMiner, InductiveMiner, discover_performance_dfg,
+    discover_prefix_tree,
+};
+use pm4py::io::CSVReader;
+use pm4py::log::{
+    Event, EventLog, Trace, activity_frequency, directly_follows, end_activities,
+    filter_activities_rework, filter_case_size, filter_directly_follows_relation,
+    filter_four_eyes_principle, filter_paths_performance, filter_trace_prefix,
+    filter_traces_containing_activity, start_activities, variants,
+};
+use pm4py::statistics::log_statistics;
+use pm4py::visualization::svg_renderer;
+use std::collections::HashMap;
+use std::path::Path;
+
+const CANOPY_DATA_DIR: &str = "/Users/sac/chatmangpt/canopy/priv/demo_data";
+
+fn canopy_csv() -> CSVReader {
+    CSVReader::new()
+        .with_case_column("case_id")
+        .with_activity_column("activity")
+        .with_timestamp_column("timestamp")
+        .with_resource_column(Some("resource"))
+}
+
+fn load_invoice() -> EventLog {
+    canopy_csv()
+        .read(Path::new(&format!("{}/invoice_processing_events.csv", CANOPY_DATA_DIR)))
+        .expect("Failed to load invoice CSV")
+}
+
+fn load_onboarding() -> EventLog {
+    canopy_csv()
+        .read(Path::new(&format!(
+            "{}/customer_onboarding_events.csv",
+            CANOPY_DATA_DIR
+        )))
+        .expect("Failed to load onboarding CSV")
+}
+
+fn load_compliance() -> EventLog {
+    canopy_csv()
+        .read(Path::new(&format!(
+            "{}/compliance_reporting_events.csv",
+            CANOPY_DATA_DIR
+        )))
+        .expect("Failed to load compliance CSV")
+}
+
+// ============================================================================
+// INNOVATION 1: Cross-Project Process Discovery
+// ============================================================================
+
+#[test]
+fn test_canopy_invoice_process_discovery() {
+    let log = load_invoice();
+    println!(
+        "Invoice Processing Log: {} traces",
+        log.traces.len()
+    );
+    println!(
+        "   Total events: {}",
+        log.traces.iter().map(|t| t.events.len()).sum::<usize>()
+    );
+
+    let dfg = DFGMiner::new().discover(&log);
+    let net = AlphaMiner::new().discover(&log);
+    let inductive_net = InductiveMiner::new().discover(&log);
+    let heuristic_net = HeuristicMiner::new().discover(&log);
+
+    println!("   DFG nodes: {}", dfg.nodes.len());
+    println!("   Alpha Miner places: {}", net.places.len());
+    println!("   Inductive places: {}", inductive_net.places.len());
+    println!("   Heuristic places: {}", heuristic_net.places.len());
+
+    assert!(!dfg.nodes.is_empty(), "DFG should have activities");
+    assert!(!net.places.is_empty(), "Petri net should have places");
+    assert!(!net.transitions.is_empty(), "Petri net should have transitions");
+}
+
+// ============================================================================
+// INNOVATION 2: Real-World Performance Analytics
+// ============================================================================
+
+#[test]
+fn test_canopy_onboarding_performance_analytics() {
+    let log = load_onboarding();
+
+    let stats = log_statistics(&log);
+    let perf_dfg = discover_performance_dfg(&log);
+
+    println!("Onboarding Performance:");
+    println!("   Total cases: {}", log.traces.len());
+    println!("   Avg trace length: {:.1}", stats.avg_trace_length);
+    println!("   Performance DFG edges: {}", perf_dfg.frequency.len());
+
+    assert!(!log.traces.is_empty(), "Should have onboarding cases");
+    assert!(stats.num_events > 0, "Should have events");
+}
+
+// ============================================================================
+// INNOVATION 3: Compliance Process Conformance
+// ============================================================================
+
+#[test]
+fn test_canopy_compliance_conformance_checking() {
+    let log = load_compliance();
+    let net = InductiveMiner::new().discover(&log);
+    let result = TokenReplay::new().check(&log, &net);
+
+    println!("Compliance Conformance:");
+    println!("   Traces checked: {}", log.traces.len());
+    println!("   Fitness: {:.4}", result.fitness);
+    println!("   Precision: {:.4}", result.precision);
+    println!("   Conformant: {}", result.is_conformant);
+
+    assert!(result.fitness >= 0.0 && result.fitness <= 1.0, "Fitness should be 0-1");
+}
+
+// ============================================================================
+// INNOVATION 4: Multi-Process Comparison
+// ============================================================================
+
+#[test]
+fn test_canopy_multi_process_comparison() {
+    let invoice_log = load_invoice();
+    let onboarding_log = load_onboarding();
+    let compliance_log = load_compliance();
+
+    let invoice_stats = log_statistics(&invoice_log);
+    let onboarding_stats = log_statistics(&onboarding_log);
+    let compliance_stats = log_statistics(&compliance_log);
+
+    println!("Multi-Process Comparison:");
+    println!(
+        "   Invoice: {} traces, {} events",
+        invoice_log.traces.len(),
+        invoice_stats.num_events
+    );
+    println!(
+        "   Onboarding: {} traces, {} events",
+        onboarding_log.traces.len(),
+        onboarding_stats.num_events
+    );
+    println!(
+        "   Compliance: {} traces, {} events",
+        compliance_log.traces.len(),
+        compliance_stats.num_events
+    );
+
+    let invoice_activities = activity_frequency(&invoice_log).len();
+    let onboarding_activities = activity_frequency(&onboarding_log).len();
+    let compliance_activities = activity_frequency(&compliance_log).len();
+
+    println!(
+        "   Activity variety: Invoice={}, Onboarding={}, Compliance={}",
+        invoice_activities, onboarding_activities, compliance_activities
+    );
+
+    assert!(!invoice_log.traces.is_empty());
+    assert!(!onboarding_log.traces.is_empty());
+    assert!(!compliance_log.traces.is_empty());
+}
+
+// ============================================================================
+// INNOVATION 5: Resource Social Network Analysis
+// ============================================================================
+
+#[test]
+fn test_canopy_resource_social_network() {
+    let log = load_invoice();
+    let resource_activity = pm4py::discovery::discover_activity_based_resource_similarity(&log);
+    let df = directly_follows(&log);
+
+    println!("Resource Social Network:");
+    println!("   Resource-activity pairs: {}", resource_activity.len());
+    println!("   Directly-follows relations: {}", df.len());
+
+    // Count resource occurrences from events
+    let mut resource_counts: HashMap<String, usize> = HashMap::new();
+    for trace in &log.traces {
+        for event in &trace.events {
+            if let Some(ref resource) = event.resource {
+                *resource_counts.entry(resource.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut sorted_resources: Vec<_> = resource_counts.iter().collect();
+    sorted_resources.sort_by(|a, b| b.1.cmp(a.1));
+
+    println!("   Top 5 resources:");
+    for (i, (resource, count)) in sorted_resources.iter().take(5).enumerate() {
+        println!("     {}. {}: {} events", i + 1, resource, count);
+    }
+
+    assert!(!resource_activity.is_empty(), "Should have resource data");
+}
+
+// ============================================================================
+// INNOVATION 6: Variant Analysis
+// ============================================================================
+
+#[test]
+fn test_canopy_variant_analysis() {
+    let log = load_invoice();
+    let vars = variants(&log);
+
+    println!("Variant Analysis:");
+    println!("   Total variants: {}", vars.len());
+
+    let mut sorted_vars: Vec<_> = vars.iter().collect();
+    sorted_vars.sort_by(|a, b| b.1.cmp(a.1));
+
+    println!("   Top 5 variants:");
+    for (i, (variant_str, count)) in sorted_vars.iter().take(5).enumerate() {
+        let percentage = (**count as f64 / log.traces.len() as f64) * 100.0;
+        println!(
+            "     {}. {} cases ({:.1}%) - {}",
+            i + 1,
+            count,
+            percentage,
+            variant_str
+        );
+    }
+
+    assert!(!vars.is_empty(), "Should have process variants");
+}
+
+// ============================================================================
+// INNOVATION 7: Bottleneck Detection
+// ============================================================================
+
+#[test]
+fn test_canopy_bottleneck_detection() {
+    let log = load_onboarding();
+    let freq = activity_frequency(&log);
+
+    println!("Bottleneck Detection:");
+    println!("   Activities found: {}", freq.len());
+
+    let mut sorted_freq: Vec<_> = freq.iter().collect();
+    sorted_freq.sort_by(|a, b| b.1.cmp(a.1));
+
+    println!("   Top 5 activities by frequency:");
+    for (i, (activity, count)) in sorted_freq.iter().take(5).enumerate() {
+        println!("     {}. {}: {} occurrences", i + 1, activity, count);
+    }
+
+    assert!(!freq.is_empty(), "Should have activity frequencies");
+}
+
+// ============================================================================
+// INNOVATION 8: Temporal Pattern Analysis
+// ============================================================================
+
+#[test]
+fn test_canopy_temporal_patterns() {
+    let log = load_compliance();
+    let starts = start_activities(&log);
+    let ends = end_activities(&log);
+
+    println!("Temporal Pattern Analysis:");
+    println!("   Start activities: {:?}", starts);
+    println!("   End activities: {:?}", ends);
+
+    let timestamps: Vec<_> = log
+        .traces
+        .iter()
+        .flat_map(|t| t.events.iter().map(|e| e.timestamp))
+        .collect();
+
+    if let (Some(min_ts), Some(max_ts)) = (timestamps.iter().min(), timestamps.iter().max()) {
+        println!(
+            "   Earliest event: {}",
+            min_ts.format("%Y-%m-%d %H:%M")
+        );
+        println!(
+            "   Latest event: {}",
+            max_ts.format("%Y-%m-%d %H:%M")
+        );
+    }
+
+    assert!(!starts.is_empty(), "Should have start activities");
+    assert!(!ends.is_empty(), "Should have end activities");
+}
+
+// ============================================================================
+// INNOVATION 9: DFG Visualization Generation
+// ============================================================================
+
+#[test]
+fn test_canopy_dfg_visualization() {
+    let log = load_invoice();
+    let dfg = DFGMiner::new().discover(&log);
+    let svg = svg_renderer::render_dfg_svg(&dfg, &svg_renderer::SvgRenderOptions::default());
+
+    println!("DFG Visualization:");
+    println!("   SVG generated: {} bytes", svg.len());
+    println!("   Contains <svg>: {}", svg.contains("<svg"));
+    println!("   DFG nodes: {}", dfg.nodes.len());
+
+    assert!(svg.contains("<svg"), "Should generate valid SVG");
+    assert!(svg.len() > 100, "SVG should have content");
+}
+
+// ============================================================================
+// INNOVATION 10: Filter and Sub-log Analysis
+// ============================================================================
+
+#[test]
+fn test_canopy_advanced_filtering() {
+    let log = load_onboarding();
+    let original_size = log.traces.len();
+
+    // Get first activity name to use for prefix filter
+    let first_activity = log
+        .traces
+        .first()
+        .and_then(|t| t.events.first())
+        .map(|e| e.activity.clone())
+        .unwrap_or_default();
+
+    let filtered = filter_trace_prefix(&log, &[first_activity.clone()]);
+    println!("Advanced Filtering:");
+    println!("   Original traces: {}", original_size);
+    println!(
+        "   After prefix filter ('{}'): {}",
+        first_activity,
+        filtered.traces.len()
+    );
+
+    let size_filtered = filter_case_size(&log, 2, 100);
+    println!("   After size filter (2-100): {}", size_filtered.traces.len());
+
+    // Filter traces containing any activity with "approve" in the name
+    let activities: Vec<String> = activity_frequency(&log)
+        .keys()
+        .filter(|a| a.to_lowercase().contains("approve"))
+        .cloned()
+        .collect();
+
+    if let Some(approve_act) = activities.first() {
+        let activity_filtered = filter_traces_containing_activity(&log, approve_act);
+        println!(
+            "   Traces with '{}': {}",
+            approve_act,
+            activity_filtered.traces.len()
+        );
+    }
+
+    assert!(filtered.traces.len() > 0 || original_size == 0, "Filter should work");
+}
+
+// ============================================================================
+// INNOVATION 11: End-to-End Pipeline Test
+// ============================================================================
+
+#[test]
+fn test_canopy_end_to_end_pipeline() {
+    let log = load_compliance();
+
+    // Step 1: Load (already done)
+    println!("Step 1: Loaded {} traces", log.traces.len());
+
+    // Step 2: Statistics
+    let stats = log_statistics(&log);
+    println!(
+        "Step 2: Stats - {} events, {:.1} avg length",
+        stats.num_events, stats.avg_trace_length
+    );
+
+    // Step 3: Discovery
+    let dfg = DFGMiner::new().discover(&log);
+    let net = InductiveMiner::new().discover(&log);
+    println!(
+        "Step 3: Discovered DFG ({} nodes) and Petri net ({} places)",
+        dfg.nodes.len(),
+        net.places.len()
+    );
+
+    // Step 4: Conformance
+    let result = TokenReplay::new().check(&log, &net);
+    println!(
+        "Step 4: Conformance - fitness={:.4}, precision={:.4}",
+        result.fitness, result.precision
+    );
+
+    // Step 5: Visualization
+    let svg = svg_renderer::render_dfg_svg(&dfg, &svg_renderer::SvgRenderOptions::default());
+    println!("Step 5: Generated {} bytes of SVG", svg.len());
+
+    assert!(!log.traces.is_empty(), "Pipeline: should load data");
+    assert!(stats.num_events > 0, "Pipeline: should compute stats");
+    assert!(!dfg.nodes.is_empty(), "Pipeline: should discover DFG");
+    assert!(svg.contains("<svg"), "Pipeline: should generate visualization");
+}
+
+// ============================================================================
+// INNOVATION 12: Prefix Tree from Business Data
+// ============================================================================
+
+#[test]
+fn test_canopy_prefix_tree_discovery() {
+    let log = load_invoice();
+    let tree = discover_prefix_tree(&log);
+
+    println!("Prefix Tree Discovery:");
+    println!("   Invoice traces: {}", log.traces.len());
+
+    let _ = tree;
+}
+
+// ============================================================================
+// INNOVATION 13: Four-Eyes Principle in Invoice Approval
+// ============================================================================
+
+#[test]
+fn test_canopy_four_eyes_principle() {
+    let log = load_invoice();
+
+    // Find activities that look like submit/approve
+    let activities: Vec<String> = activity_frequency(&log).keys().cloned().collect();
+    let submit_like = activities
+        .iter()
+        .find(|a| a.to_lowercase().contains("submit"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let approve_like = activities
+        .iter()
+        .find(|a| a.to_lowercase().contains("approve"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    if !submit_like.is_empty() && !approve_like.is_empty() {
+        let filtered = filter_four_eyes_principle(&log, submit_like, approve_like);
+        println!(
+            "Four-eyes ({} vs {}): {} of {} traces pass",
+            submit_like,
+            approve_like,
+            filtered.traces.len(),
+            log.traces.len()
+        );
+    }
+}
+
+// ============================================================================
+// INNOVATION 14: Directly-Follows Filter
+// ============================================================================
+
+#[test]
+fn test_canopy_directly_follows_filter() {
+    let log = load_invoice();
+    let activities: Vec<String> = activity_frequency(&log).keys().cloned().collect();
+
+    if activities.len() >= 2 {
+        let filtered =
+            filter_directly_follows_relation(&log, &activities[0], &activities[1]);
+        println!(
+            "DF filter ({} -> {}): {} of {} traces",
+            activities[0],
+            activities[1],
+            filtered.traces.len(),
+            log.traces.len()
+        );
+    }
+}
+
+// ============================================================================
+// INNOVATION 15: Rework Detection in Business Processes
+// ============================================================================
+
+#[test]
+fn test_canopy_rework_detection() {
+    let log = load_onboarding();
+    let activities: Vec<String> = activity_frequency(&log).keys().cloned().collect();
+
+    // Try to find rework for each activity
+    for activity in &activities {
+        let rework_traces = filter_activities_rework(&log, activity);
+        if rework_traces.traces.len() > 0 {
+            println!(
+                "Rework on '{}': {} of {} traces",
+                activity,
+                rework_traces.traces.len(),
+                log.traces.len()
+            );
+        }
+    }
+}
+
+// ============================================================================
+// INNOVATION 16: Performance DFG with Real Timestamps
+// ============================================================================
+
+#[test]
+fn test_canopy_performance_dfg_with_metrics() {
+    let log = load_invoice();
+    let perf_dfg = discover_performance_dfg(&log);
+
+    println!("Performance DFG:");
+    println!("   Activities: {}", perf_dfg.activities.len());
+    println!("   Frequency edges: {}", perf_dfg.frequency.len());
+    println!("   Performance edges: {}", perf_dfg.performance.len());
+
+    for ((from, to), perf) in perf_dfg.performance.iter().take(5) {
+        println!(
+            "     {} -> {}: mean={}ms, min={}ms, max={}ms",
+            from, to, perf.mean, perf.min, perf.max
+        );
+    }
+
+    assert!(!perf_dfg.frequency.is_empty(), "Should have frequency data");
+}
+
+// ============================================================================
+// INNOVATION 17: Paths Performance Filter
+// ============================================================================
+
+#[test]
+fn test_canopy_paths_performance_filter() {
+    let log = load_invoice();
+    let activities: Vec<String> = activity_frequency(&log).keys().cloned().collect();
+
+    if activities.len() >= 2 {
+        // Filter for paths taking less than 7 days (604800 seconds)
+        let filtered = filter_paths_performance(&log, &activities[0], &activities[1], 0.0, 604800.0);
+        println!(
+            "Paths perf ({} -> {} < 7d): {} of {} traces",
+            activities[0],
+            activities[1],
+            filtered.traces.len(),
+            log.traces.len()
+        );
+    }
+}
+
+// ============================================================================
+// INNOVATION 18: Alpha vs Inductive vs Heuristic Comparison
+// ============================================================================
+
+#[test]
+fn test_canopy_miner_comparison() {
+    let log = load_compliance();
+
+    let alpha_net = AlphaMiner::new().discover(&log);
+    let inductive_net = InductiveMiner::new().discover(&log);
+    let heuristic_net = HeuristicMiner::new().discover(&log);
+
+    println!("Miner Comparison on Compliance:");
+    println!(
+        "   Alpha: {} places, {} transitions, {} arcs",
+        alpha_net.places.len(),
+        alpha_net.transitions.len(),
+        alpha_net.arcs.len()
+    );
+    println!(
+        "   Inductive: {} places, {} transitions, {} arcs",
+        inductive_net.places.len(),
+        inductive_net.transitions.len(),
+        inductive_net.arcs.len()
+    );
+    println!(
+        "   Heuristic: {} places, {} transitions, {} arcs",
+        heuristic_net.places.len(),
+        heuristic_net.transitions.len(),
+        heuristic_net.arcs.len()
+    );
+
+    assert!(!alpha_net.transitions.is_empty());
+    assert!(!inductive_net.transitions.is_empty());
+    assert!(!heuristic_net.transitions.is_empty());
+}
+
+// ============================================================================
+// INNOVATION 19: Conformance Comparison Across Miners
+// ============================================================================
+
+#[test]
+fn test_canopy_conformance_comparison() {
+    let log = load_invoice();
+
+    let inductive_net = InductiveMiner::new().discover(&log);
+    let heuristic_net = HeuristicMiner::new().discover(&log);
+
+    let ind_result = AlignmentChecker::new().check(&log, &inductive_net);
+    let heur_result = AlignmentChecker::new().check(&log, &heuristic_net);
+
+    println!("Conformance Comparison:");
+    println!(
+        "   Inductive: fitness={:.4}, precision={:.4}",
+        ind_result.fitness, ind_result.precision
+    );
+    println!(
+        "   Heuristic: fitness={:.4}, precision={:.4}",
+        heur_result.fitness, heur_result.precision
+    );
+
+    assert!(ind_result.fitness >= 0.0);
+    assert!(heur_result.fitness >= 0.0);
+}
+
+// ============================================================================
+// INNOVATION 20: Synthetic Agent Lifecycle (Chicago TDD with programmatic log)
+// ============================================================================
+
+#[test]
+fn test_synthetic_agent_lifecycle_discovery() {
+    let mut log = EventLog::new();
+
+    // Simulate 10 agent lifecycles
+    for i in 0..10 {
+        let mut trace = Trace::new(format!("agent_{}", i));
+
+        trace.add_event(
+            Event::new("agent_spawn", Utc::now() - Duration::hours(1))
+                .with_attribute("agent_id", format!("agent_{}", i))
+                .with_attribute("spawn_type", "goal_dispatch"),
+        );
+
+        trace.add_event(
+            Event::new("initialize_memory", Utc::now() - Duration::minutes(55))
+                .with_attribute("agent_id", format!("agent_{}", i)),
+        );
+
+        trace.add_event(
+            Event::new("tool_execute", Utc::now() - Duration::minutes(50))
+                .with_attribute("agent_id", format!("agent_{}", i))
+                .with_attribute("tool_name", "file_read"),
+        );
+
+        trace.add_event(
+            Event::new("tool_execute", Utc::now() - Duration::minutes(45))
+                .with_attribute("agent_id", format!("agent_{}", i))
+                .with_attribute("tool_name", "brainstorm"),
+        );
+
+        trace.add_event(
+            Event::new("llm_request", Utc::now() - Duration::minutes(40))
+                .with_attribute("agent_id", format!("agent_{}", i))
+                .with_attribute("provider", "anthropic"),
+        );
+
+        trace.add_event(
+            Event::new("llm_response", Utc::now() - Duration::minutes(39))
+                .with_attribute("agent_id", format!("agent_{}", i))
+                .with_attribute("tokens_used", "1234"),
+        );
+
+        trace.add_event(
+            Event::new("goal_achieved", Utc::now() - Duration::minutes(5))
+                .with_attribute("agent_id", format!("agent_{}", i)),
+        );
+
+        trace.add_event(
+            Event::new("agent_terminate", Utc::now())
+                .with_attribute("agent_id", format!("agent_{}", i))
+                .with_attribute("termination_reason", "success"),
+        );
+
+        log.add_trace(trace);
+    }
+
+    let dfg = DFGMiner::new().discover(&log);
+    let net = InductiveMiner::new().discover(&log);
+    let result = TokenReplay::new().check(&log, &net);
+
+    println!("Agent Lifecycle Discovery:");
+    println!("   Traces: {}", log.traces.len());
+    println!("   DFG activities: {}", dfg.nodes.len());
+    println!("   DFG edges: {}", dfg.edges.len());
+    println!("   Petri net places: {}", net.places.len());
+    println!("   Fitness: {:.4}", result.fitness);
+
+    assert_eq!(log.traces.len(), 10, "Should have 10 agent traces");
+    assert!(!dfg.nodes.is_empty(), "Should discover DFG");
+}

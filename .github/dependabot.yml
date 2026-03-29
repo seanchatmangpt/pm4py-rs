@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # Cargo dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "seanchatmangpt"
+    allow:
+      - dependency-type: "direct"
+      - dependency-type: "indirect"
+    commit-message:
+      prefix: "deps"
+      prefix-scope: "cargo"
+    pull-request-branch-name:
+      separator: "/"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "seanchatmangpt"
+    commit-message:
+      prefix: "ci"
+      prefix-scope: "actions"
+    pull-request-branch-name:
+      separator: "/"

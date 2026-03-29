@@ -1,0 +1,712 @@
+//! PetriNet Model Manipulation and Token Game Semantics Integration Tests
+//!
+//! Tests the deepest untested APIs in pm4py-rust:
+//! - PetriNet construction (add_place, add_transition, add_arc)
+//! - PetriNet lookup (get_place, get_transition, get_arcs_from/to)
+//! - Workflow net topology (set_initial_place, set_final_place, source_places, sink_places)
+//! - Transition filtering (visible_transitions, invisible_transitions)
+//! - Token game semantics (is_transition_enabled, fire_transition)
+//! - State-space exploration (count_reachable_states)
+//! - Place/Transition builders (with_initial_marking, with_final_marking, is_invisible)
+//!
+//! Chicago TDD: NO MOCKS, testing against real constructed Petri nets
+
+use pm4py::discovery::AlphaMiner;
+use pm4py::io::CSVReader;
+use pm4py::log::{Event, EventLog, Trace};
+use pm4py::models::petri_net::{Arc, Place, PetriNet, Transition};
+use std::collections::HashMap;
+use std::path::Path;
+
+fn load_invoice() -> EventLog {
+    let path = format!(
+        "{}/canopy/priv/demo_data/invoice_events.csv",
+        std::env::var("HOME").unwrap()
+    );
+    CSVReader::new()
+        .with_case_column("case_id")
+        .with_activity_column("activity")
+        .with_timestamp_column("timestamp")
+        .read(Path::new(&path))
+        .unwrap_or_else(|_| {
+            let mut log = EventLog::new();
+            let now = chrono::Utc::now();
+            for i in 0..10 {
+                let mut trace = Trace::new(format!("case_{}", i));
+                trace.add_event(Event::new("register", now).with_resource("clerk"));
+                trace.add_event(Event::new("examine", now + chrono::Duration::minutes(10)).with_resource("senior"));
+                trace.add_event(Event::new("decide", now + chrono::Duration::hours(1)).with_resource("mgr"));
+                log.add_trace(trace);
+            }
+            log
+        })
+}
+
+// ============================================================================
+// 1. Place and Transition Builders
+// ============================================================================
+
+#[test]
+fn test_place_with_initial_marking() {
+    let place = Place::new("start").with_initial_marking(1);
+    assert_eq!(place.initial_marking, 1);
+    assert_eq!(place.name, "start");
+    assert!(place.final_marking.is_none());
+}
+
+#[test]
+fn test_place_with_final_marking() {
+    let place = Place::new("end").with_initial_marking(0).with_final_marking(1);
+    assert_eq!(place.initial_marking, 0);
+    assert_eq!(place.final_marking, Some(1));
+}
+
+#[test]
+fn test_transition_with_label() {
+    let t = Transition::new("t1").with_label("register");
+    assert_eq!(t.name, "t1");
+    assert_eq!(t.label, Some("register".to_string()));
+    assert!(!t.is_invisible());
+}
+
+#[test]
+fn test_transition_invisible_tau() {
+    let t = Transition::new("tau");
+    assert!(t.label.is_none());
+    assert!(t.is_invisible());
+}
+
+#[test]
+fn test_arc_with_weight() {
+    let arc = Arc::new("p1", "t1").with_weight(2);
+    assert_eq!(arc.weight, 2);
+}
+
+// ============================================================================
+// 2. PetriNet Construction
+// ============================================================================
+
+#[test]
+fn test_petri_net_manual_construction() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("source").with_initial_marking(1);
+    let t1 = Transition::new("start").with_label("start");
+    let p2 = Place::new("sink").with_final_marking(1);
+
+    let p1_id = p1.id.clone();
+    let t1_id = t1.id.clone();
+    let p2_id = p2.id.clone();
+
+    net.add_place(p1);
+    net.add_transition(t1);
+    net.add_place(p2);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+
+    assert_eq!(net.places.len(), 2);
+    assert_eq!(net.transitions.len(), 1);
+    assert_eq!(net.arcs.len(), 2);
+}
+
+#[test]
+fn test_petri_net_with_parallel_paths() {
+    // Build: source -> t1 -> p2 -> t3 -> sink
+    //              \-> t2 -> p3 -> t4 -> sink
+    let mut net = PetriNet::new();
+    let source = Place::new("source").with_initial_marking(1);
+    let sink = Place::new("sink").with_final_marking(1);
+    let p2 = Place::new("p2");
+    let p3 = Place::new("p3");
+    let t1 = Transition::new("t1").with_label("path_a");
+    let t2 = Transition::new("t2").with_label("path_b");
+    let t3 = Transition::new("t3").with_label("join");
+    let t4 = Transition::new("t4").with_label("join");
+
+    let source_id = source.id.clone();
+    let sink_id = sink.id.clone();
+    let p2_id = p2.id.clone();
+    let p3_id = p3.id.clone();
+    let t1_id = t1.id.clone();
+    let t2_id = t2.id.clone();
+    let t3_id = t3.id.clone();
+    let t4_id = t4.id.clone();
+
+    net.add_place(source);
+    net.add_place(p2);
+    net.add_place(p3);
+    net.add_place(sink);
+    net.add_transition(t1);
+    net.add_transition(t2);
+    net.add_transition(t3);
+    net.add_transition(t4);
+    net.add_arc(Arc::new(&source_id, &t1_id));
+    net.add_arc(Arc::new(&source_id, &t2_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&t2_id, &p3_id));
+    net.add_arc(Arc::new(&p2_id, &t3_id));
+    net.add_arc(Arc::new(&p3_id, &t4_id));
+    net.add_arc(Arc::new(&t4_id, &sink_id));
+
+    assert_eq!(net.places.len(), 4);
+    assert_eq!(net.transitions.len(), 4);
+    assert_eq!(net.arcs.len(), 8);
+    assert_eq!(net.visible_transitions().len(), 4);
+}
+
+#[test]
+fn test_petri_net_with_tau_transitions() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let tau = Transition::new("tau"); // invisible
+    let p2 = Place::new("p2");
+    let vis = Transition::new("vis").with_label("visible");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let tau_id = tau.id.clone();
+    let vis_id = vis.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_transition(tau);
+    net.add_transition(vis);
+    net.add_arc(Arc::new(&p1_id, &tau_id));
+    net.add_arc(Arc::new(&tau_id, &p2_id));
+    net.add_arc(Arc::new(&p1_id, &vis_id));
+    net.add_arc(Arc::new(&vis_id, &p2_id));
+
+    assert_eq!(net.invisible_transitions().len(), 1);
+    assert_eq!(net.visible_transitions().len(), 1);
+    assert!(net.invisible_transitions()[0].is_invisible());
+}
+
+// ============================================================================
+// 3. PetriNet Lookup
+// ============================================================================
+
+#[test]
+fn test_get_place_and_transition() {
+    let mut net = PetriNet::new();
+    let p = Place::new("my_place");
+    let t = Transition::new("my_trans").with_label("labeled");
+    let p_id = p.id.clone();
+    let t_id = t.id.clone();
+
+    net.add_place(p);
+    net.add_transition(t);
+
+    assert!(net.get_place(&p_id).is_some());
+    assert!(net.get_place("nonexistent").is_none());
+    assert!(net.get_transition(&t_id).is_some());
+    assert!(net.get_transition("nonexistent").is_none());
+
+    assert_eq!(net.get_place(&p_id).unwrap().name, "my_place");
+    assert_eq!(net.get_transition(&t_id).unwrap().label, Some("labeled".to_string()));
+}
+
+#[test]
+fn test_get_arcs_from_and_to() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1");
+    let p2 = Place::new("p2");
+    let p3 = Place::new("p3");
+    let t1 = Transition::new("t1");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let p3_id = p3.id.clone();
+    let t1_id = t1.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_place(p3);
+    net.add_transition(t1);
+
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&t1_id, &p3_id));
+
+    let arcs_from_p1 = net.get_arcs_from(&p1_id);
+    assert_eq!(arcs_from_p1.len(), 1);
+    assert_eq!(arcs_from_p1[0].to, t1_id);
+
+    let arcs_to_p2 = net.get_arcs_to(&p2_id);
+    assert_eq!(arcs_to_p2.len(), 1);
+    assert_eq!(arcs_to_p2[0].from, t1_id);
+
+    let arcs_to_t1 = net.get_arcs_to(&t1_id);
+    assert_eq!(arcs_to_t1.len(), 1);
+
+    let arcs_from_t1 = net.get_arcs_from(&t1_id);
+    assert_eq!(arcs_from_t1.len(), 2); // t1 -> p2 and t1 -> p3
+}
+
+// ============================================================================
+// 4. Workflow Net Topology
+// ============================================================================
+
+#[test]
+fn test_set_initial_and_final_place() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("start");
+    let p2 = Place::new("end");
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.set_initial_place(p1_id);
+    net.set_final_place(p2_id);
+
+    assert_eq!(net.initial_place.as_deref(), Some("start"));
+    assert_eq!(net.final_place.as_deref(), Some("end"));
+}
+
+#[test]
+fn test_source_and_sink_places() {
+    let log = load_invoice();
+    let miner = AlphaMiner::new();
+    let net = miner.discover(&log);
+
+    let sources = net.source_places();
+    let sinks = net.sink_places();
+
+    // Alpha miner should produce a workflow net
+    assert_eq!(sources.len(), 1, "should have exactly 1 source place");
+    assert_eq!(sinks.len(), 1, "should have exactly 1 sink place");
+
+    // Source should have no incoming transition arcs
+    for source in &sources {
+        let incoming = net.get_arcs_to(&source.id);
+        assert!(incoming.is_empty(), "source should have no incoming arcs from transitions");
+    }
+}
+
+#[test]
+fn test_discovered_net_is_workflow_net() {
+    let log = load_invoice();
+    let miner = AlphaMiner::new();
+    let net = miner.discover(&log);
+    assert!(net.is_workflow_net(), "alpha miner should produce a workflow net");
+}
+
+// ============================================================================
+// 5. Token Game Semantics
+// ============================================================================
+
+#[test]
+fn test_is_transition_enabled_basic() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let t1 = Transition::new("t1");
+
+    let p1_id = p1.id.clone();
+    let t1_id = t1.id.clone();
+    let p2_id = p2.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_transition(t1);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+
+    let marking = HashMap::from([(p1_id, 1)]);
+    assert!(net.is_transition_enabled(&t1_id, &marking));
+
+    let empty_marking = HashMap::new();
+    assert!(!net.is_transition_enabled(&t1_id, &empty_marking));
+}
+
+#[test]
+fn test_fire_transition_consumes_produces_tokens() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let t1 = Transition::new("t1");
+
+    let p1_id = p1.id.clone();
+    let t1_id = t1.id.clone();
+    let p2_id = p2.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_transition(t1);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+
+    let mut marking = HashMap::from([(p1_id.clone(), 1)]);
+    let fired = net.fire_transition(&t1_id, &mut marking);
+
+    assert!(fired);
+    assert_eq!(*marking.get(&p1_id).unwrap(), 0, "input token should be consumed");
+    assert_eq!(*marking.get(&p2_id).unwrap(), 1, "output token should be produced");
+}
+
+#[test]
+fn test_fire_transition_blocked_when_disabled() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1"); // no initial marking
+    let p2 = Place::new("p2");
+    let t1 = Transition::new("t1");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let t1_id = t1.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_transition(t1);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+
+    let mut marking = HashMap::new();
+    let fired = net.fire_transition(&t1_id, &mut marking);
+    assert!(!fired, "should not fire without tokens");
+    assert!(marking.is_empty());
+}
+
+#[test]
+fn test_multi_step_firing_sequence() {
+    // Build: p1 -> t1 -> p2 -> t2 -> p3
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let p3 = Place::new("p3").with_final_marking(1);
+    let t1 = Transition::new("t1");
+    let t2 = Transition::new("t2");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let p3_id = p3.id.clone();
+    let t1_id = t1.id.clone();
+    let t2_id = t2.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_place(p3);
+    net.add_transition(t1);
+    net.add_transition(t2);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&p2_id, &t2_id));
+    net.add_arc(Arc::new(&t2_id, &p3_id));
+
+    let mut marking = HashMap::from([(p1_id.clone(), 1)]);
+    assert!(net.fire_transition(&t1_id, &mut marking));
+    assert_eq!(*marking.get(&p2_id).unwrap(), 1);
+
+    assert!(net.fire_transition(&t2_id, &mut marking));
+    assert_eq!(*marking.get(&p3_id).unwrap(), 1);
+
+    // p1 and p2 should be empty now
+    assert_eq!(*marking.get(&p1_id).unwrap(), 0);
+    assert_eq!(*marking.get(&p2_id).unwrap(), 0);
+}
+
+#[test]
+fn test_firing_with_arc_weights() {
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(3);
+    let p2 = Place::new("p2");
+    let t1 = Transition::new("t1");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let t1_id = t1.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_transition(t1);
+    net.add_arc(Arc::new(&p1_id, &t1_id).with_weight(2));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+
+    let mut marking = HashMap::from([(p1_id.clone(), 3)]);
+    let fired = net.fire_transition(&t1_id, &mut marking);
+    assert!(fired);
+    assert_eq!(*marking.get(&p1_id).unwrap(), 1, "2 tokens consumed");
+    assert_eq!(*marking.get(&p2_id).unwrap(), 2, "2 tokens produced");
+}
+
+// ============================================================================
+// 6. State-Space Exploration
+// ============================================================================
+
+#[test]
+fn test_count_reachable_states_simple_sequence() {
+    // p1 -> t1 -> p2 -> t2 -> p3
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let p3 = Place::new("p3");
+    let t1 = Transition::new("t1");
+    let t2 = Transition::new("t2");
+
+    let p1_id = p1.id.clone();
+    let t1_id = t1.id.clone();
+    let p2_id = p2.id.clone();
+    let t2_id = t2.id.clone();
+    let p3_id = p3.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_place(p3);
+    net.add_transition(t1);
+    net.add_transition(t2);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&p2_id, &t2_id));
+    net.add_arc(Arc::new(&t2_id, &p3_id));
+
+    let marking = HashMap::from([(p1_id, 1)]);
+    let states = net.count_reachable_states(&marking);
+    // States: [p1=1], [p2=1], [p3=1] = 3 states
+    assert_eq!(states, 3);
+}
+
+#[test]
+fn test_count_reachable_states_with_choice() {
+    // p1 -> t1 -> p2 -> t3 -> p4 (left path)
+    // p1 -> t2 -> p3 -> t4 -> p4 (right path)
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let p3 = Place::new("p3");
+    let p4 = Place::new("p4");
+    let t1 = Transition::new("t1");
+    let t2 = Transition::new("t2");
+    let t3 = Transition::new("t3");
+    let t4 = Transition::new("t4");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let p3_id = p3.id.clone();
+    let p4_id = p4.id.clone();
+    let t1_id = t1.id.clone();
+    let t2_id = t2.id.clone();
+    let t3_id = t3.id.clone();
+    let t4_id = t4.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_place(p3);
+    net.add_place(p4);
+    net.add_transition(t1);
+    net.add_transition(t2);
+    net.add_transition(t3);
+    net.add_transition(t4);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&p1_id, &t2_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&t2_id, &p3_id));
+    net.add_arc(Arc::new(&t3_id, &p4_id));
+    net.add_arc(Arc::new(&t4_id, &p4_id));
+
+    let marking = HashMap::from([(p1_id, 1)]);
+    let states = net.count_reachable_states(&marking);
+    // States: [p1=1], [p2=1], [p3=1], [p4=1] = 4 states (choice doesn't create more)
+    assert_eq!(states, 4);
+}
+
+#[test]
+fn test_count_reachable_states_empty_net() {
+    let net = PetriNet::new();
+    let marking = HashMap::new();
+    let states = net.count_reachable_states(&marking);
+    assert_eq!(states, 1, "empty marking counts as 1 state");
+}
+
+#[test]
+fn test_count_reachable_states_with_loop() {
+    // p1 -> t1 -> p2 -> t2 -> p1 (loop back!)
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let t1 = Transition::new("t1");
+    let t2 = Transition::new("t2");
+
+    let p1_id = p1.id.clone();
+    let t1_id = t1.id.clone();
+    let p2_id = p2.id.clone();
+    let t2_id = t2.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_transition(t1);
+    net.add_transition(t2);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&p2_id, &t2_id));
+    net.add_arc(Arc::new(&t2_id, &p1_id));
+
+    let marking = HashMap::from([(p1_id, 1)]);
+    let states = net.count_reachable_states(&marking);
+    // States cycle: [p1=1], [p2=1], [p1=1] (already visited) = 2 states
+    assert_eq!(states, 2);
+}
+
+// ============================================================================
+// 7. Discovered Net Token Game
+// ============================================================================
+
+#[test]
+fn test_discovered_net_token_game() {
+    let log = load_invoice();
+    let miner = AlphaMiner::new();
+    let net = miner.discover(&log);
+
+    // Build initial marking from source places
+    let mut marking: HashMap<String, usize> = HashMap::new();
+    for source in net.source_places() {
+        marking.insert(source.id.clone(), source.initial_marking);
+    }
+
+    let initial_tokens: usize = marking.values().sum();
+
+    // Fire enabled transitions until none left
+    let mut steps = 0;
+    loop {
+        let enabled: Vec<String> = net
+            .transitions
+            .iter()
+            .filter(|t| net.is_transition_enabled(&t.id, &marking))
+            .map(|t| t.id.clone())
+            .collect();
+
+        if enabled.is_empty() {
+            break;
+        }
+
+        // Fire first enabled transition
+        let fired = net.fire_transition(&enabled[0], &mut marking);
+        assert!(fired);
+        steps += 1;
+
+        if steps > 100 {
+            break; // Safety limit
+        }
+    }
+
+    println!(
+        "Discovered net token game: {} initial tokens, {} steps fired",
+        initial_tokens, steps
+    );
+    assert!(steps > 0, "should fire at least one transition");
+}
+
+#[test]
+fn test_discovered_net_visible_transitions_match_activities() {
+    let log = load_invoice();
+    let activities = pm4py::utils::get_activity_labels(&log);
+    let miner = AlphaMiner::new();
+    let net = miner.discover(&log);
+
+    let visible = net.visible_transitions();
+    for t in &visible {
+        if let Some(label) = &t.label {
+            assert!(
+                activities.contains(label),
+                "visible transition label {} not in log activities",
+                label
+            );
+        }
+    }
+}
+
+// ============================================================================
+// 8. PetriNet to ProcessTree to BPMN full pipeline
+// ============================================================================
+
+#[test]
+fn test_discovered_net_full_conversion_pipeline() {
+    let log = load_invoice();
+    let miner = AlphaMiner::new();
+    let net = miner.discover(&log);
+
+    // 1. Verify workflow net
+    assert!(net.is_workflow_net());
+
+    // 2. Convert to ProcessTree
+    let tree = pm4py::models::petri_net_to_process_tree(&net);
+    if let Some(tree) = &tree {
+        let root = &tree.root;
+        assert!(root.is_operator() || root.is_activity());
+        println!(
+            "Process tree: {} operators, {} activities, depth={}",
+            root.operator_count(),
+            root.leaf_count(),
+            root.depth()
+        );
+    }
+
+    // 3. Analyze state space
+    let mut marking: HashMap<String, usize> = HashMap::new();
+    for source in net.source_places() {
+        marking.insert(source.id.clone(), source.initial_marking);
+    }
+    let states = net.count_reachable_states(&marking);
+    println!("Reachable states from initial marking: {}", states);
+    assert!(states > 1);
+}
+
+// ============================================================================
+// 9. Concurrent Token Game (Choice)
+// ============================================================================
+
+#[test]
+fn test_choice_net_both_paths() {
+    // p1 -> t1 -> p2 -> t3 -> p4
+    // p1 -> t2 -> p3 -> t4 -> p4
+    let mut net = PetriNet::new();
+    let p1 = Place::new("p1").with_initial_marking(1);
+    let p2 = Place::new("p2");
+    let p3 = Place::new("p3");
+    let p4 = Place::new("p4");
+    let t1 = Transition::new("t1").with_label("A");
+    let t2 = Transition::new("t2").with_label("B");
+    let t3 = Transition::new("t3");
+    let t4 = Transition::new("t4");
+
+    let p1_id = p1.id.clone();
+    let p2_id = p2.id.clone();
+    let p3_id = p3.id.clone();
+    let p4_id = p4.id.clone();
+    let t1_id = t1.id.clone();
+    let t2_id = t2.id.clone();
+    let t3_id = t3.id.clone();
+    let t4_id = t4.id.clone();
+
+    net.add_place(p1);
+    net.add_place(p2);
+    net.add_place(p3);
+    net.add_place(p4);
+    net.add_transition(t1);
+    net.add_transition(t2);
+    net.add_transition(t3);
+    net.add_transition(t4);
+    net.add_arc(Arc::new(&p1_id, &t1_id));
+    net.add_arc(Arc::new(&p1_id, &t2_id));
+    net.add_arc(Arc::new(&t1_id, &p2_id));
+    net.add_arc(Arc::new(&t2_id, &p3_id));
+    net.add_arc(Arc::new(&p2_id, &t3_id));
+    net.add_arc(Arc::new(&p3_id, &t4_id));
+    net.add_arc(Arc::new(&t3_id, &p4_id));
+    net.add_arc(Arc::new(&t4_id, &p4_id));
+
+    let mut marking = HashMap::from([(p1_id, 1)]);
+
+    // Fire t1 (path A)
+    assert!(net.fire_transition(&t1_id, &mut marking));
+    assert_eq!(*marking.get(&p2_id).unwrap(), 1);
+
+    // t2 is still enabled (p1 still has tokens for t2)
+    assert!(net.is_transition_enabled(&t2_id, &marking));
+
+    // But after t2 fires, p1 is empty
+    assert!(net.fire_transition(&t2_id, &mut marking));
+    assert_eq!(*marking.get(&p3_id).unwrap(), 1);
+
+    // Neither t1 nor t2 can fire again
+    assert!(!net.is_transition_enabled(&t1_id, &marking));
+    assert!(!net.is_transition_enabled(&t2_id, &marking));
+}

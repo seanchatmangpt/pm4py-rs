@@ -1,0 +1,959 @@
+/// Deployment Validation Tests
+/// Tests blue-green, canary, and rolling deployment scenarios
+/// Validates zero-downtime deployments and safe rollbacks
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
+
+// Simulated deployment types
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeploymentPhase {
+    Blue,
+    Green,
+    Canary,
+    Rolling,
+    Stable,
+}
+
+#[derive(Debug, Clone)]
+struct ReplicaState {
+    id: String,
+    version: String,
+    phase: DeploymentPhase,
+    ready: bool,
+    active: bool,  // tracks if replica is actively serving
+    start_time: Instant,
+    connections: u64,
+    request_count: Arc<AtomicU64>,
+}
+
+impl ReplicaState {
+    fn new(id: String, version: String, phase: DeploymentPhase) -> Self {
+        Self {
+            id,
+            version,
+            phase,
+            ready: false,
+            active: true,
+            start_time: Instant::now(),
+            connections: 0,
+            request_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn mark_ready(&mut self) {
+        self.ready = true;
+    }
+
+    fn mark_inactive(&mut self) {
+        self.active = false;
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.active && self.ready && self.start_time.elapsed() > Duration::from_secs(1)
+    }
+
+    fn handle_request(&self) -> bool {
+        if !self.is_healthy() {
+            return false;
+        }
+        self.request_count.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn get_request_count(&self) -> u64 {
+        self.request_count.load(Ordering::SeqCst)
+    }
+}
+
+struct DeploymentSimulator {
+    replicas: HashMap<String, ReplicaState>,
+    total_requests: Arc<AtomicU64>,
+    dropped_requests: Arc<AtomicU64>,
+    current_phase: DeploymentPhase,
+}
+
+impl DeploymentSimulator {
+    fn new() -> Self {
+        Self {
+            replicas: HashMap::new(),
+            total_requests: Arc::new(AtomicU64::new(0)),
+            dropped_requests: Arc::new(AtomicU64::new(0)),
+            current_phase: DeploymentPhase::Blue,
+        }
+    }
+
+    fn add_replica(&mut self, id: String, version: String, phase: DeploymentPhase) {
+        let replica = ReplicaState::new(id, version, phase);
+        self.replicas.insert(replica.id.clone(), replica);
+    }
+
+    fn mark_replica_ready(&mut self, id: &str) -> bool {
+        if let Some(replica) = self.replicas.get_mut(id) {
+            replica.mark_ready();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get_ready_replicas(&self) -> usize {
+        self.replicas.values().filter(|r| r.ready && r.active).count()
+    }
+
+    fn get_replicas_by_phase(&self, phase: &DeploymentPhase) -> usize {
+        self.replicas
+            .values()
+            .filter(|r| r.phase == *phase && r.ready && r.active)
+            .count()
+    }
+
+    fn mark_replica_inactive(&mut self, id: &str) -> bool {
+        if let Some(replica) = self.replicas.get_mut(id) {
+            replica.mark_inactive();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn route_request(&self, phase: &DeploymentPhase) -> bool {
+        let available_replicas: Vec<_> = self
+            .replicas
+            .values()
+            .filter(|r| r.phase == *phase && r.is_healthy())
+            .collect();
+
+        self.total_requests.fetch_add(1, Ordering::SeqCst);
+
+        if available_replicas.is_empty() {
+            self.dropped_requests.fetch_add(1, Ordering::SeqCst);
+            return false;
+        }
+
+        // Simple round-robin
+        let total = self.total_requests.load(Ordering::SeqCst) as usize;
+        let idx = total % available_replicas.len();
+        available_replicas[idx].handle_request();
+        true
+    }
+
+    fn get_dropped_request_count(&self) -> u64 {
+        self.dropped_requests.load(Ordering::SeqCst)
+    }
+
+    fn get_total_request_count(&self) -> u64 {
+        self.total_requests.load(Ordering::SeqCst)
+    }
+
+    fn get_drop_rate(&self) -> f64 {
+        let total = self.get_total_request_count();
+        if total == 0 {
+            0.0
+        } else {
+            (self.get_dropped_request_count() as f64 / total as f64) * 100.0
+        }
+    }
+}
+
+#[cfg(test)]
+mod blue_green_deployment_tests {
+    use super::*;
+
+    #[test]
+    fn test_blue_green_deploy_simultaneous() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy blue (v1)
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Blue);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Blue), 5);
+
+        // Deploy green (v2) alongside blue
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Green);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Green), 5);
+        assert_eq!(simulator.get_ready_replicas(), 10);
+    }
+
+    #[test]
+    fn test_blue_green_gradual_traffic_shift() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy blue
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Blue);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Deploy green
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Green);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Generate traffic (100% to blue)
+        let requests_at_100_blue = 100;
+        for _ in 0..requests_at_100_blue {
+            let _ = simulator.route_request(&DeploymentPhase::Blue);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Shift to 50% green, 50% blue
+        let shift_requests = 100;
+        for i in 0..shift_requests {
+            if i % 2 == 0 {
+                let _ = simulator.route_request(&DeploymentPhase::Blue);
+            } else {
+                let _ = simulator.route_request(&DeploymentPhase::Green);
+            }
+        }
+
+        // Check drops didn't increase significantly
+        let final_drops = simulator.get_dropped_request_count();
+        assert!(final_drops == initial_drops, "Drops increased during traffic shift");
+    }
+
+    #[test]
+    fn test_blue_green_zero_downtime() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Setup blue
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Blue);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Simulate high traffic
+        let traffic_load = 100;
+        for _ in 0..traffic_load {
+            let _ = simulator.route_request(&DeploymentPhase::Blue);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Deploy green
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Green);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Shift traffic
+        for i in 0..traffic_load {
+            if i % 2 == 0 {
+                let _ = simulator.route_request(&DeploymentPhase::Blue);
+            } else {
+                let _ = simulator.route_request(&DeploymentPhase::Green);
+            }
+        }
+
+        let final_drops = simulator.get_dropped_request_count();
+
+        assert!(
+            initial_drops == 0,
+            "Blue deployment had drops: {}",
+            initial_drops
+        );
+        assert!(
+            final_drops == initial_drops,
+            "Traffic shift introduced drops"
+        );
+    }
+
+    #[test]
+    fn test_blue_green_decommission() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy blue
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Blue);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Deploy green
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Green);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_ready_replicas(), 10);
+
+        // Decommission blue replicas
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.mark_replica_inactive(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Blue), 0);
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Green), 5);
+
+        // Verify traffic still routes to green
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Green);
+        }
+
+        // Verify no drops on green
+        assert_eq!(simulator.get_dropped_request_count(), 0);
+    }
+
+    #[test]
+    fn test_blue_green_rapid_abort() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy blue
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Blue);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Generate traffic on blue
+        for _ in 0..500 {
+            let _ = simulator.route_request(&DeploymentPhase::Blue);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Deploy green
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Green);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Shift some traffic to green
+        for _ in 0..250 {
+            let _ = simulator.route_request(&DeploymentPhase::Green);
+        }
+
+        // Abort green deployment (rapid rollback)
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.mark_replica_inactive(&id);
+        }
+
+        // Route remaining traffic back to blue
+        for _ in 0..250 {
+            let _ = simulator.route_request(&DeploymentPhase::Blue);
+        }
+
+        // No new drops should occur
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+}
+
+#[cfg(test)]
+mod canary_deployment_tests {
+    use super::*;
+
+    #[test]
+    fn test_canary_5_percent_deployment() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy stable (v1)
+        for i in 0..20 {
+            let id = format!("stable-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Stable);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Stable), 20);
+
+        // Deploy canary (v2) at 5% (1 replica)
+        let id = "canary-0".to_string();
+        simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Canary);
+        simulator.mark_replica_ready(&id);
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Canary), 1);
+    }
+
+    #[test]
+    fn test_canary_error_rate_detection() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy stable
+        for i in 0..20 {
+            let id = format!("stable-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Stable);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Deploy canary
+        let id = "canary-0".to_string();
+        simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Canary);
+        simulator.mark_replica_ready(&id);
+
+        // Send traffic to canary
+        let test_requests = 50;
+        for _ in 0..test_requests {
+            let _ = simulator.route_request(&DeploymentPhase::Canary);
+        }
+
+        // Canary should successfully handle requests (no drops)
+        assert_eq!(simulator.get_dropped_request_count(), 0);
+    }
+
+    #[test]
+    fn test_canary_progressive_promotion() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy stable (20 replicas)
+        for i in 0..20 {
+            let id = format!("stable-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Stable);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Canary 5% (1 replica)
+        let mut canary_count = 1;
+        simulator.add_replica(
+            "canary-0".to_string(),
+            "v2".to_string(),
+            DeploymentPhase::Canary,
+        );
+        simulator.mark_replica_ready("canary-0");
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Canary), 1);
+
+        // Promote to 25% (5 replicas)
+        canary_count = 5;
+        for i in 1..5 {
+            let id = format!("canary-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Canary);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Canary), 5);
+
+        // Promote to 50% (10 replicas)
+        canary_count = 10;
+        for i in 5..10 {
+            let id = format!("canary-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Canary);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Canary), 10);
+
+        // Promote to 100% (20 replicas)
+        for i in 10..20 {
+            let id = format!("canary-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Canary);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Remove stable
+        simulator.replicas.retain(|_, r| r.phase != DeploymentPhase::Stable);
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Canary), 20);
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Stable), 0);
+    }
+
+    #[test]
+    fn test_canary_rapid_rollback() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy stable
+        for i in 0..20 {
+            let id = format!("stable-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Stable);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Deploy canary
+        simulator.add_replica(
+            "canary-0".to_string(),
+            "v2".to_string(),
+            DeploymentPhase::Canary,
+        );
+        simulator.mark_replica_ready("canary-0");
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Immediate rollback due to high error rate
+        simulator.mark_replica_inactive("canary-0");
+
+        // Verify stable still serves traffic
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Stable);
+        }
+
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+
+    #[test]
+    fn test_canary_traffic_monitoring() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy stable
+        for i in 0..10 {
+            let id = format!("stable-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Stable);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Deploy canary
+        simulator.add_replica(
+            "canary-0".to_string(),
+            "v2".to_string(),
+            DeploymentPhase::Canary,
+        );
+        simulator.mark_replica_ready("canary-0");
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Send traffic to both
+        for i in 0..100 {
+            if i % 10 == 0 {
+                let _ = simulator.route_request(&DeploymentPhase::Canary);
+            } else {
+                let _ = simulator.route_request(&DeploymentPhase::Stable);
+            }
+        }
+
+        // Verify no drops
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+}
+
+#[cfg(test)]
+mod rolling_update_tests {
+    use super::*;
+
+    #[test]
+    fn test_rolling_update_max_surge() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Initial deployment: 5 replicas
+        for i in 0..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_ready_replicas(), 5);
+
+        // Rolling update with maxSurge=1 means max 6 total
+        // Add one new v2 replica
+        simulator.add_replica(
+            "v2-0".to_string(),
+            "v2".to_string(),
+            DeploymentPhase::Rolling,
+        );
+        simulator.mark_replica_ready("v2-0");
+
+        assert_eq!(simulator.get_ready_replicas(), 6);
+
+        // Remove one v1 replica
+        simulator.replicas.remove("v1-0");
+
+        assert_eq!(simulator.get_ready_replicas(), 5);
+    }
+
+    #[test]
+    fn test_rolling_update_max_unavailable_zero() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Initial: 5 replicas
+        for i in 0..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        let initial_ready = simulator.get_ready_replicas();
+
+        // Rolling update: add v2, remove v1 (one at a time)
+        for i in 0..5 {
+            // Add new v2 replica
+            let new_id = format!("v2-{}", i);
+            simulator.add_replica(new_id.clone(), "v2".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&new_id);
+
+            // Verify always at least 5 ready
+            let current_ready = simulator.get_ready_replicas();
+            assert!(
+                current_ready >= initial_ready,
+                "Dropped below minimum ready replicas: {} < {}",
+                current_ready,
+                initial_ready
+            );
+
+            // Remove old v1 replica
+            let old_id = format!("v1-{}", i);
+            simulator.replicas.remove(&old_id);
+        }
+
+        assert_eq!(simulator.get_ready_replicas(), 5);
+    }
+
+    #[test]
+    fn test_rolling_update_no_dropped_requests() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Initial: 5 v1 replicas
+        for i in 0..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Generate traffic during rolling update
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        // Rolling update iteration 1
+        simulator.add_replica("v2-0".to_string(), "v2".to_string(), DeploymentPhase::Rolling);
+        simulator.mark_replica_ready("v2-0");
+
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        simulator.mark_replica_inactive("v1-0");
+
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        // Continue rolling updates...
+        for i in 1..5 {
+            let new_id = format!("v2-{}", i);
+            simulator.add_replica(new_id.clone(), "v2".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&new_id);
+
+            for _ in 0..50 {
+                let _ = simulator.route_request(&DeploymentPhase::Rolling);
+            }
+
+            let old_id = format!("v1-{}", i);
+            simulator.mark_replica_inactive(&old_id);
+
+            for _ in 0..50 {
+                let _ = simulator.route_request(&DeploymentPhase::Rolling);
+            }
+        }
+
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+}
+
+#[cfg(test)]
+mod graceful_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn test_graceful_shutdown_drains_connections() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Setup replicas
+        for i in 0..5 {
+            let id = format!("replica-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Generate requests
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Initiate graceful shutdown on one replica (keep 4 active)
+        simulator.mark_replica_inactive("replica-0");
+
+        // Continue routing requests to remaining replicas
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+
+    #[test]
+    fn test_graceful_shutdown_zero_dropped_connections() {
+        let mut simulator = DeploymentSimulator::new();
+
+        for i in 0..10 {
+            let id = format!("replica-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Heavy load during shutdown
+        for _ in 0..500 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        // Shut down 3 replicas sequentially
+        for i in 0..3 {
+            let id = format!("replica-{}", i);
+            simulator.mark_replica_inactive(&id);
+
+            // Verify traffic continues to remaining replicas
+            for _ in 0..100 {
+                let _ = simulator.route_request(&DeploymentPhase::Rolling);
+            }
+        }
+
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+
+    #[test]
+    fn test_rollback_to_previous_version() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy v1
+        for i in 0..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_ready_replicas(), 5);
+
+        // Update to v2
+        simulator.replicas.clear();
+        for i in 0..5 {
+            let id = format!("v2-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Verify v2 is running
+        let v2_count = simulator
+            .replicas
+            .values()
+            .filter(|r| r.version == "v2")
+            .count();
+        assert_eq!(v2_count, 5);
+
+        // Rollback to v1
+        simulator.replicas.clear();
+        for i in 0..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        let v1_count = simulator
+            .replicas
+            .values()
+            .filter(|r| r.version == "v1")
+            .count();
+        assert_eq!(v1_count, 5);
+    }
+
+    #[test]
+    fn test_rollback_maintains_replica_count() {
+        let mut simulator = DeploymentSimulator::new();
+
+        let initial_replicas = 5;
+
+        // Deploy v1
+        for i in 0..initial_replicas {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        // Rolling update to v2
+        for i in 0..initial_replicas {
+            let new_id = format!("v2-{}", i);
+            simulator.add_replica(new_id.clone(), "v2".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&new_id);
+
+            let old_id = format!("v1-{}", i);
+            simulator.replicas.remove(&old_id);
+
+            assert_eq!(
+                simulator.get_ready_replicas(),
+                initial_replicas,
+                "Replica count changed during update"
+            );
+        }
+
+        // Rollback to v1
+        simulator.replicas.clear();
+        for i in 0..initial_replicas {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_ready_replicas(), initial_replicas);
+    }
+
+    #[test]
+    fn test_rollback_atomic_safety() {
+        let mut simulator = DeploymentSimulator::new();
+
+        // Deploy v1
+        for i in 0..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        let initial_drops = simulator.get_dropped_request_count();
+
+        // Start requests
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        // Rolling update to v2 (partial)
+        for i in 0..3 {
+            let new_id = format!("v2-{}", i);
+            simulator.add_replica(new_id.clone(), "v2".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&new_id);
+
+            let old_id = format!("v1-{}", i);
+            simulator.mark_replica_inactive(&old_id);
+        }
+
+        // Atomic rollback: deactivate all v2
+        for i in 0..3 {
+            let id = format!("v2-{}", i);
+            simulator.mark_replica_inactive(&id);
+        }
+
+        // Reactivate remaining v1 by adding them back
+        for i in 3..5 {
+            let id = format!("v1-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Rolling);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_ready_replicas(), 5);
+
+        // Continue requests
+        for _ in 0..100 {
+            let _ = simulator.route_request(&DeploymentPhase::Rolling);
+        }
+
+        assert_eq!(simulator.get_dropped_request_count(), initial_drops);
+    }
+}
+
+#[cfg(test)]
+mod replica_state_tests {
+    use super::*;
+
+    #[test]
+    fn test_replica_health_check() {
+        let replica = ReplicaState::new(
+            "test-replica".to_string(),
+            "v1".to_string(),
+            DeploymentPhase::Rolling,
+        );
+
+        // Not healthy before marking ready
+        assert!(!replica.is_healthy());
+
+        let mut replica = replica;
+        replica.mark_ready();
+
+        // Still not healthy immediately
+        assert!(!replica.is_healthy());
+
+        // Simulate time passage
+        replica.start_time = Instant::now() - Duration::from_secs(2);
+
+        // Now healthy
+        assert!(replica.is_healthy());
+    }
+
+    #[test]
+    fn test_replica_request_counting() {
+        let replica = ReplicaState::new(
+            "test-replica".to_string(),
+            "v1".to_string(),
+            DeploymentPhase::Rolling,
+        );
+
+        let mut replica = replica;
+        replica.mark_ready();
+        replica.start_time = Instant::now() - Duration::from_secs(2);
+
+        for i in 1..=100 {
+            replica.handle_request();
+            assert_eq!(replica.get_request_count(), i as u64);
+        }
+    }
+}
+
+#[cfg(test)]
+mod deployment_simulator_tests {
+    use super::*;
+
+    #[test]
+    fn test_simulator_tracks_multiple_phases() {
+        let mut simulator = DeploymentSimulator::new();
+
+        for i in 0..5 {
+            let id = format!("blue-{}", i);
+            simulator.add_replica(id.clone(), "v1".to_string(), DeploymentPhase::Blue);
+            simulator.mark_replica_ready(&id);
+        }
+
+        for i in 0..5 {
+            let id = format!("green-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Green);
+            simulator.mark_replica_ready(&id);
+        }
+
+        for i in 0..2 {
+            let id = format!("canary-{}", i);
+            simulator.add_replica(id.clone(), "v2".to_string(), DeploymentPhase::Canary);
+            simulator.mark_replica_ready(&id);
+        }
+
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Blue), 5);
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Green), 5);
+        assert_eq!(simulator.get_replicas_by_phase(&DeploymentPhase::Canary), 2);
+        assert_eq!(simulator.get_ready_replicas(), 12);
+    }
+
+    #[test]
+    fn test_simulator_drop_rate_calculation() {
+        let simulator = DeploymentSimulator::new();
+
+        assert_eq!(simulator.get_drop_rate(), 0.0);
+
+        // Manually add dropped requests
+        simulator.dropped_requests.store(50, Ordering::SeqCst);
+        simulator.total_requests.store(1000, Ordering::SeqCst);
+
+        assert_eq!(simulator.get_drop_rate(), 5.0);
+    }
+}

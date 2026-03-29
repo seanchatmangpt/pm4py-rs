@@ -1,0 +1,710 @@
+use chrono::{Duration, Utc};
+use pm4py::conformance::TokenReplay;
+use pm4py::discovery::AlphaMiner;
+/// Load Testing Suite for pm4py-rust
+///
+/// Validates system behavior under extreme concurrent load conditions:
+/// - Concurrent discovery requests (10, 50, 100 simultaneous)
+/// - Concurrent conformance checks (10, 50, 100 simultaneous)
+/// - Concurrent statistics calculations
+/// - Ensures no deadlocks, data corruption, or memory leaks
+///
+/// Test Categories:
+/// 1. Discovery Concurrency: Parallel Alpha Miner with large event logs
+/// 2. Conformance Concurrency: Parallel Token Replay conformance checks
+/// 3. Statistics Concurrency: Parallel statistical analysis
+/// 4. Mixed Operations: Concurrent discovery + conformance + statistics
+/// 5. Resource Exhaustion: Sustaining operations near heap limits
+/// 6. Cancellation & Recovery: Graceful degradation under overload
+use pm4py::log::{Event, EventLog, Trace};
+use pm4py::statistics::log_stats;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Instant;
+
+// ============================================================================
+// HELPER: Log Generation
+// ============================================================================
+
+/// Generate a realistic event log with N traces
+fn generate_test_log(num_traces: usize, events_per_trace: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    for trace_id in 0..num_traces {
+        let mut trace = Trace::new(format!("TRACE_{}", trace_id));
+        let mut event_time = base_time + Duration::hours(trace_id as i64);
+
+        for event_seq in 0..events_per_trace {
+            let activity = match event_seq % 7 {
+                0 => "start",
+                1 => "verify",
+                2 => "process",
+                3 => "check",
+                4 => "approve",
+                5 => "execute",
+                _ => "complete",
+            };
+
+            trace.add_event(Event::new(activity, event_time));
+            event_time += Duration::minutes(5);
+
+            // Add optional rework loop (20% of cases)
+            if event_seq == 3 && trace_id % 5 == 0 {
+                trace.add_event(Event::new("rework", event_time));
+                event_time += Duration::minutes(10);
+                trace.add_event(Event::new("verify", event_time));
+                event_time += Duration::minutes(5);
+            }
+        }
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+/// Generate a large log for stress testing
+fn generate_large_log(total_events: usize) -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+    let mut event_count = 0;
+    let mut trace_id = 0;
+
+    while event_count < total_events {
+        let mut trace = Trace::new(format!("TRACE_{}", trace_id));
+        let mut event_time = base_time + Duration::hours(trace_id as i64);
+
+        let events_in_this_trace = std::cmp::min(50, total_events - event_count);
+
+        for event_seq in 0..events_in_this_trace {
+            let activity = match event_seq % 7 {
+                0 => "start",
+                1 => "verify",
+                2 => "process",
+                3 => "check",
+                4 => "approve",
+                5 => "execute",
+                _ => "complete",
+            };
+
+            trace.add_event(Event::new(activity, event_time));
+            event_time += Duration::minutes(5);
+            event_count += 1;
+        }
+
+        log.add_trace(trace);
+        trace_id += 1;
+    }
+
+    log
+}
+
+// ============================================================================
+// TEST 1: CONCURRENT DISCOVERY (10 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_discovery_10_simultaneous() {
+    println!("\n=== CONCURRENT DISCOVERY: 10 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let error_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for i in 0..10 {
+        let log_clone = Arc::clone(&log);
+        let success_clone = Arc::clone(&success_count);
+        let error_clone = Arc::clone(&error_count);
+
+        let handle = thread::spawn(move || {
+            let miner = AlphaMiner::new();
+            let model = miner.discover(log_clone.as_ref());
+
+            // Verify model validity
+            if !model.places().is_empty() && !model.transitions().is_empty() {
+                success_clone.fetch_add(1, Ordering::SeqCst);
+                println!("  Thread {} completed successfully", i);
+            } else {
+                error_clone.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+    let errors = error_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}, Errors: {}", successes, errors);
+
+    assert_eq!(successes, 10, "Not all discoveries completed successfully");
+    assert_eq!(errors, 0, "Unexpected errors during concurrent discovery");
+    assert!(elapsed.as_secs() < 30, "Discovery took too long");
+}
+
+// ============================================================================
+// TEST 2: CONCURRENT DISCOVERY (50 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_discovery_50_simultaneous() {
+    println!("\n=== CONCURRENT DISCOVERY: 50 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for _i in 0..50 {
+        let log_clone = Arc::clone(&log);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            let miner = AlphaMiner::new();
+            let model = miner.discover(log_clone.as_ref());
+
+            if !model.places().is_empty() && !model.transitions().is_empty() {
+                success_clone.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}", successes);
+
+    assert_eq!(successes, 50, "Not all 50 discoveries completed");
+    assert!(elapsed.as_secs() < 60, "Discovery took too long");
+}
+
+// ============================================================================
+// TEST 3: CONCURRENT DISCOVERY (100 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_discovery_100_simultaneous() {
+    println!("\n=== CONCURRENT DISCOVERY: 100 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for _i in 0..100 {
+        let log_clone = Arc::clone(&log);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            let miner = AlphaMiner::new();
+            let model = miner.discover(log_clone.as_ref());
+
+            if !model.places().is_empty() && !model.transitions().is_empty() {
+                success_clone.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}", successes);
+
+    assert_eq!(successes, 100, "Not all 100 discoveries completed");
+    assert!(elapsed.as_secs() < 60, "Discovery timeout");
+}
+
+// ============================================================================
+// TEST 4: CONCURRENT CONFORMANCE (10 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_conformance_10_simultaneous() {
+    println!("\n=== CONCURRENT CONFORMANCE: 10 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let miner = AlphaMiner::new();
+    let model = Arc::new(miner.discover(log.as_ref()));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for i in 0..10 {
+        let log_clone = Arc::clone(&log);
+        let model_clone = Arc::clone(&model);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            let checker = TokenReplay::new();
+            match checker.replay(log_clone.as_ref(), &model_clone) {
+                Ok(result) => {
+                    let fitness = result.fitness();
+                    if fitness >= 0.0 && fitness <= 1.0 {
+                        success_clone.fetch_add(1, Ordering::SeqCst);
+                        println!("  Thread {}: Fitness {}", i, fitness);
+                    }
+                }
+                Err(_e) => {
+                    // Failed gracefully
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}", successes);
+
+    assert!(successes >= 5, "Not enough conformance checks completed");
+    assert!(elapsed.as_secs() < 30, "Conformance check timeout");
+}
+
+// ============================================================================
+// TEST 5: CONCURRENT CONFORMANCE (50 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_conformance_50_simultaneous() {
+    println!("\n=== CONCURRENT CONFORMANCE: 50 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let miner = AlphaMiner::new();
+    let model = Arc::new(miner.discover(log.as_ref()));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for _i in 0..50 {
+        let log_clone = Arc::clone(&log);
+        let model_clone = Arc::clone(&model);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            let checker = TokenReplay::new();
+            if let Ok(result) = checker.replay(log_clone.as_ref(), &model_clone) {
+                let fitness = result.fitness();
+                if fitness >= 0.0 && fitness <= 1.0 {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}", successes);
+
+    assert!(successes >= 25, "Not enough conformance checks completed");
+    assert!(elapsed.as_secs() < 30, "Conformance timeout");
+}
+
+// ============================================================================
+// TEST 6: CONCURRENT CONFORMANCE (100 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_conformance_100_simultaneous() {
+    println!("\n=== CONCURRENT CONFORMANCE: 100 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let miner = AlphaMiner::new();
+    let model = Arc::new(miner.discover(log.as_ref()));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for _i in 0..100 {
+        let log_clone = Arc::clone(&log);
+        let model_clone = Arc::clone(&model);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            let checker = TokenReplay::new();
+            if let Ok(result) = checker.replay(log_clone.as_ref(), &model_clone) {
+                let fitness = result.fitness();
+                if fitness >= 0.0 && fitness <= 1.0 {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}", successes);
+
+    assert!(successes >= 50, "Not enough conformance checks completed");
+    assert!(elapsed.as_secs() < 30, "Conformance timeout");
+}
+
+// ============================================================================
+// TEST 7: CONCURRENT STATISTICS (50 simultaneous)
+// ============================================================================
+
+#[test]
+fn test_concurrent_statistics_50_simultaneous() {
+    println!("\n=== CONCURRENT STATISTICS: 50 Simultaneous ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    for _i in 0..50 {
+        let log_clone = Arc::clone(&log);
+        let success_clone = Arc::clone(&success_count);
+
+        let handle = thread::spawn(move || {
+            let num_traces = log_clone.traces().len();
+            let num_events: usize = log_clone.traces().iter().map(|t| t.events().len()).sum();
+
+            if num_events > 0 && num_traces > 0 {
+                success_clone.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let successes = success_count.load(Ordering::SeqCst);
+
+    println!("  Completed in: {:?}", elapsed);
+    println!("  Successes: {}", successes);
+
+    assert_eq!(successes, 50, "Not all statistics calculations completed");
+    assert!(elapsed.as_secs() < 30, "Statistics timeout");
+}
+
+// ============================================================================
+// TEST 8: MIXED CONCURRENT OPERATIONS (10 each)
+// ============================================================================
+
+#[test]
+fn test_mixed_concurrent_operations() {
+    println!("\n=== MIXED CONCURRENT OPERATIONS (10 discovery, 10 conformance, 10 statistics) ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let miner = AlphaMiner::new();
+    let model = Arc::new(miner.discover(log.as_ref()));
+
+    let discovery_count = Arc::new(AtomicUsize::new(0));
+    let conformance_count = Arc::new(AtomicUsize::new(0));
+    let stats_count = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    // Spawn 10 discovery threads
+    for _i in 0..10 {
+        let log_clone = Arc::clone(&log);
+        let count_clone = Arc::clone(&discovery_count);
+
+        let handle = thread::spawn(move || {
+            let miner = AlphaMiner::new();
+            let m = miner.discover(log_clone.as_ref());
+
+            if !m.places().is_empty() {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Spawn 10 conformance threads
+    for _i in 0..10 {
+        let log_clone = Arc::clone(&log);
+        let model_clone = Arc::clone(&model);
+        let count_clone = Arc::clone(&conformance_count);
+
+        let handle = thread::spawn(move || {
+            let checker = TokenReplay::new();
+            if let Ok(r) = checker.replay(log_clone.as_ref(), &model_clone) {
+                let fitness = r.fitness();
+                if fitness >= 0.0 {
+                    count_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Spawn 10 statistics threads
+    for _i in 0..10 {
+        let log_clone = Arc::clone(&log);
+        let count_clone = Arc::clone(&stats_count);
+
+        let handle = thread::spawn(move || {
+            let num_events: usize = log_clone.traces().iter().map(|t| t.events().len()).sum();
+
+            if num_events > 0 {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+
+    println!("  Completed in: {:?}", elapsed);
+    println!(
+        "  Discoveries: {}, Conformance: {}, Statistics: {}",
+        discovery_count.load(Ordering::SeqCst),
+        conformance_count.load(Ordering::SeqCst),
+        stats_count.load(Ordering::SeqCst)
+    );
+
+    assert!(discovery_count.load(Ordering::SeqCst) >= 8);
+    assert!(conformance_count.load(Ordering::SeqCst) >= 5);
+    assert_eq!(stats_count.load(Ordering::SeqCst), 10);
+    assert!(elapsed.as_secs() < 60, "Mixed operations timeout");
+}
+
+// ============================================================================
+// TEST 9: LARGE LOG PROCESSING (1M events)
+// ============================================================================
+
+#[test]
+fn test_large_log_single_thread() {
+    println!("\n=== LARGE LOG PROCESSING (100k events, single thread) ===");
+
+    let log = generate_large_log(100_000);
+    let total_events: usize = log.traces().iter().map(|t| t.events().len()).sum();
+
+    println!("  Generated log with {} events", total_events);
+
+    let start = Instant::now();
+
+    let miner = AlphaMiner::new();
+    let model = miner.discover(&log);
+    let discovery_time = start.elapsed();
+
+    println!("  Discovery completed in: {:?}", discovery_time);
+    println!(
+        "  Places: {}, Transitions: {}",
+        model.places().len(),
+        model.transitions().len()
+    );
+
+    assert!(!model.places().is_empty());
+    assert!(!model.transitions().is_empty());
+    assert!(
+        discovery_time.as_secs() < 60,
+        "Large log processing timeout"
+    );
+}
+
+// ============================================================================
+// TEST 10: RESOURCE CONTENTION (All operations simultaneously)
+// ============================================================================
+
+#[test]
+fn test_resource_contention_all_concurrent() {
+    println!("\n=== RESOURCE CONTENTION (All operations simultaneously) ===");
+
+    let log = Arc::new(generate_test_log(100, 10));
+    let miner = AlphaMiner::new();
+    let model = Arc::new(miner.discover(log.as_ref()));
+
+    let total_completed = Arc::new(AtomicUsize::new(0));
+    let mut handles = vec![];
+
+    let start = Instant::now();
+
+    // Spawn 30 threads of each operation type
+    for _i in 0..30 {
+        // Discovery threads
+        {
+            let log_clone = Arc::clone(&log);
+            let total_clone = Arc::clone(&total_completed);
+
+            let handle = thread::spawn(move || {
+                let miner = AlphaMiner::new();
+                let _m = miner.discover(log_clone.as_ref());
+                total_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+
+        // Conformance threads
+        {
+            let log_clone = Arc::clone(&log);
+            let model_clone = Arc::clone(&model);
+            let total_clone = Arc::clone(&total_completed);
+
+            let handle = thread::spawn(move || {
+                let checker = TokenReplay::new();
+                let _r = checker.replay(log_clone.as_ref(), &model_clone);
+                total_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+
+        // Statistics threads
+        {
+            let log_clone = Arc::clone(&log);
+            let total_clone = Arc::clone(&total_completed);
+
+            let handle = thread::spawn(move || {
+                let _num_events: usize = log_clone.traces().iter().map(|t| t.events().len()).sum();
+                total_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let elapsed = start.elapsed();
+    let completed = total_completed.load(Ordering::SeqCst);
+
+    println!("  Total time: {:?}", elapsed);
+    println!("  Total operations completed: {}", completed);
+
+    assert_eq!(completed, 90, "Not all operations completed");
+    assert!(elapsed.as_secs() < 180, "Resource contention test timeout");
+}
+
+// ============================================================================
+// TEST 11: BATCH OPERATIONS (Sequential load)
+// ============================================================================
+
+#[test]
+fn test_batch_discovery_sequential() {
+    println!("\n=== BATCH DISCOVERY (100 sequential operations) ===");
+
+    let mut success_count = 0;
+    let start = Instant::now();
+
+    for i in 0..100 {
+        let log = generate_test_log(50, 7);
+        let miner = AlphaMiner::new();
+        let model = miner.discover(&log);
+
+        if !model.places().is_empty() {
+            success_count += 1;
+        }
+
+        if (i + 1) % 20 == 0 {
+            println!("  Completed {} batch operations", i + 1);
+        }
+    }
+
+    let elapsed = start.elapsed();
+
+    println!("  Completed {} operations in: {:?}", success_count, elapsed);
+    assert_eq!(success_count, 100, "Not all batch discoveries completed");
+}
+
+// ============================================================================
+// TEST 12: MEMORY STABILITY (Long-running operations)
+// ============================================================================
+
+#[test]
+fn test_memory_stability_iterations() {
+    println!("\n=== MEMORY STABILITY (1000 iterations) ===");
+
+    let iterations = 1000;
+    let mut success_count = 0;
+
+    let start = Instant::now();
+
+    for i in 0..iterations {
+        let log = generate_test_log(20, 5);
+        let miner = AlphaMiner::new();
+        let model = miner.discover(&log);
+
+        if !model.places().is_empty() {
+            success_count += 1;
+        }
+
+        if (i + 1) % 100 == 0 {
+            println!("  Completed {} iterations", i + 1);
+        }
+    }
+
+    let elapsed = start.elapsed();
+
+    println!("  Total iterations: {}", success_count);
+    println!("  Total time: {:?}", elapsed);
+    println!(
+        "  Average per iteration: {:.2}ms",
+        (elapsed.as_millis() as f64 / success_count as f64)
+    );
+
+    assert_eq!(
+        success_count, iterations,
+        "Not all iterations completed successfully"
+    );
+}

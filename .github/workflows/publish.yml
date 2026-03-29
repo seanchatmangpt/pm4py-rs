@@ -1,0 +1,128 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., v0.2.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # =========================================================================
+  # Verify Release Build
+  # =========================================================================
+  verify:
+    name: Verify Release Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check Cargo.toml version matches tag
+        run: |
+          VERSION=$(cargo pkgid | cut -d'#' -f2 | cut -d':' -f2)
+          TAG=${{ github.ref }}
+          TAG=${TAG#refs/tags/}
+          if [ "v$VERSION" != "$TAG" ] && [ -z "${{ github.event.inputs.version }}" ]; then
+            echo "Version mismatch! Cargo.toml has $VERSION but tag is $TAG"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Build release
+        run: cargo build --release --all-features
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Generate docs
+        run: cargo doc --all-features --no-deps
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+
+  # =========================================================================
+  # Publish to crates.io
+  # =========================================================================
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # =========================================================================
+  # Create GitHub Release
+  # =========================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract tag name
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION=${{ steps.tag.outputs.version }}
+          # Get commits since last tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 $VERSION^ 2>/dev/null || echo "")
+          if [ -z "$PREVIOUS_TAG" ]; then
+            CHANGELOG=$(git log --format="- %s (%h)" $VERSION)
+          else
+            CHANGELOG=$(git log --format="- %s (%h)" $PREVIOUS_TAG..$VERSION)
+          fi
+
+          # Store changelog in file
+          echo "$CHANGELOG" > /tmp/changelog.txt
+          cat /tmp/changelog.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.version, '-') }}
+          body_path: /tmp/changelog.txt
+          files: |
+            README.md
+            Cargo.lock
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on success
+        run: |
+          echo "✓ Published ${{ steps.tag.outputs.version }} to crates.io"
+          echo "✓ Created GitHub release"
+          echo "✓ Published documentation to docs.rs"

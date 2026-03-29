@@ -1,0 +1,200 @@
+//! Conformance Checking with Token Replay Example
+//!
+//! This example demonstrates how to check conformance between an event log
+//! and a process model using token replay. This tells you how well the model
+//! fits the observed behavior.
+//!
+//! Run: cargo run --example 3_conformance_token_replay
+
+use chrono::Utc;
+use pm4py::{
+    conformance::TokenReplay,
+    discovery::InductiveMiner,
+    log::{Event, EventLog, Trace},
+};
+use std::collections::HashMap;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Conformance Checking with Token Replay ===\n");
+
+    // Step 1: Create a "golden" event log (representing ideal process behavior)
+    println!("Step 1: Creating golden process model from ideal log...");
+    let golden_log = create_golden_log();
+    println!("✓ Golden log: {} traces", golden_log.traces.len());
+
+    // Step 2: Discover process model from golden log
+    println!("Step 2: Discovering process model with Inductive Miner...");
+    let miner = InductiveMiner::new();
+    let model = miner.discover(&golden_log);
+    println!("✓ Model discovered with {} places and {} transitions",
+        model.places.len(),
+        model.transitions.len()
+    );
+    println!();
+
+    // Step 3: Create actual log with some deviations
+    println!("Step 3: Creating actual log with process deviations...");
+    let actual_log = create_actual_log_with_deviations();
+    println!("✓ Actual log: {} traces", actual_log.traces.len());
+    println!();
+
+    // Step 4: Check conformance using token replay
+    println!("Step 4: Checking conformance with token replay...");
+    let checker = TokenReplay::new();
+    let result = checker.check(&actual_log, &model);
+
+    println!("✓ Conformance check complete");
+    println!();
+
+    // Step 5: Display conformance results
+    println!("Step 5: Conformance metrics:");
+    println!("  Overall fitness: {:.2}%", result.fitness * 100.0);
+    println!("  Traces fitting perfectly: {}/{}", result.fitting_traces, actual_log.traces.len());
+    println!();
+
+    // Step 6: Analyze deviations by trace
+    println!("Step 6: Trace-by-trace analysis:");
+    println!("  {:<15} {:<20} {:<15} {:<15}", "Case ID", "Status", "Missing", "Remaining");
+    println!("  {}", "-".repeat(65));
+
+    for (i, trace_result) in result.trace_results.iter().enumerate() {
+        let case_id = &actual_log.traces[i].id;
+        let status = if trace_result.is_fitting {
+            "✓ FITS"
+        } else {
+            "✗ DEVIATES"
+        };
+
+        let missing_str = format!("{} tokens", trace_result.missing_tokens);
+        let remaining_str = format!("{} tokens", trace_result.remaining_tokens);
+
+        println!("  {:<15} {:<20} {:<15} {:<15}",
+            case_id,
+            status,
+            missing_str,
+            remaining_str
+        );
+    }
+    println!();
+
+    // Step 7: Identify common deviation patterns
+    println!("Step 7: Deviation patterns analysis:");
+    let mut deviation_types: HashMap<&str, i32> = HashMap::new();
+
+    for trace_result in &result.trace_results {
+        if !trace_result.is_fitting {
+            if trace_result.missing_tokens > 0 && trace_result.remaining_tokens > 0 {
+                *deviation_types.entry("both missing and remaining").or_insert(0) += 1;
+            } else if trace_result.missing_tokens > 0 {
+                *deviation_types.entry("missing tokens only").or_insert(0) += 1;
+            } else if trace_result.remaining_tokens > 0 {
+                *deviation_types.entry("remaining tokens only").or_insert(0) += 1;
+            }
+        }
+    }
+
+    if deviation_types.is_empty() {
+        println!("  ✓ No deviations found - all traces fit the model perfectly");
+    } else {
+        for (pattern, count) in deviation_types.iter() {
+            let pct = (*count as f32 / actual_log.traces.len() as f32) * 100.0;
+            println!("  - {}: {} traces ({:.1}%)", pattern, count, pct);
+        }
+    }
+    println!();
+
+    // Step 8: Recommendations
+    println!("Step 8: Recommendations:");
+    if result.fitness >= 0.95 {
+        println!("  ✓ Excellent model fit (≥95%) - model accurately represents reality");
+    } else if result.fitness >= 0.80 {
+        println!("  ⚠ Good model fit (≥80%) - minor deviations may be acceptable noise");
+    } else {
+        println!("  ✗ Poor model fit (<80%) - consider:");
+        println!("    1. Discovering a new model from the actual log");
+        println!("    2. Investigating root causes of deviations");
+        println!("    3. Checking data quality issues");
+    }
+
+    println!("\n=== Conformance check complete ===");
+    Ok(())
+}
+
+/// Create a "golden" log representing ideal process behavior
+/// Process: Submit → Review → Approve → Execute → Complete
+fn create_golden_log() -> EventLog {
+    let mut log = EventLog::new();
+
+    for i in 1..=10 {
+        let mut trace = Trace::new(format!("golden-case-{:03}", i));
+        let time = Utc::now();
+
+        trace.add_event(Event::new("Submit Request", time).with_resource("Customer"));
+        trace.add_event(Event::new("Review Request", time).with_resource("Agent"));
+        trace.add_event(Event::new("Approve Request", time).with_resource("Manager"));
+        trace.add_event(Event::new("Execute Work", time).with_resource("Worker"));
+        trace.add_event(Event::new("Complete", time).with_resource("System"));
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+/// Create an actual log with various types of deviations
+fn create_actual_log_with_deviations() -> EventLog {
+    let mut log = EventLog::new();
+
+    // Case 1: Perfect fit
+    let mut trace1 = Trace::new("case-001-perfect");
+    let time = Utc::now();
+    trace1.add_event(Event::new("Submit Request", time).with_resource("Customer"));
+    trace1.add_event(Event::new("Review Request", time).with_resource("Agent"));
+    trace1.add_event(Event::new("Approve Request", time).with_resource("Manager"));
+    trace1.add_event(Event::new("Execute Work", time).with_resource("Worker"));
+    trace1.add_event(Event::new("Complete", time).with_resource("System"));
+    log.add_trace(trace1);
+
+    // Case 2: Missing "Approve" step (skip)
+    let mut trace2 = Trace::new("case-002-skip");
+    let time = Utc::now();
+    trace2.add_event(Event::new("Submit Request", time).with_resource("Customer"));
+    trace2.add_event(Event::new("Review Request", time).with_resource("Agent"));
+    trace2.add_event(Event::new("Execute Work", time).with_resource("Worker"));  // Skipped approve
+    trace2.add_event(Event::new("Complete", time).with_resource("System"));
+    log.add_trace(trace2);
+
+    // Case 3: Extra "Rework" step (insert)
+    let mut trace3 = Trace::new("case-003-rework");
+    let time = Utc::now();
+    trace3.add_event(Event::new("Submit Request", time).with_resource("Customer"));
+    trace3.add_event(Event::new("Review Request", time).with_resource("Agent"));
+    trace3.add_event(Event::new("Rework Request", time).with_resource("Agent"));  // Extra step
+    trace3.add_event(Event::new("Approve Request", time).with_resource("Manager"));
+    trace3.add_event(Event::new("Execute Work", time).with_resource("Worker"));
+    trace3.add_event(Event::new("Complete", time).with_resource("System"));
+    log.add_trace(trace3);
+
+    // Case 4: Wrong order (approve before review)
+    let mut trace4 = Trace::new("case-004-wrong-order");
+    let time = Utc::now();
+    trace4.add_event(Event::new("Submit Request", time).with_resource("Customer"));
+    trace4.add_event(Event::new("Approve Request", time).with_resource("Manager"));  // Wrong order
+    trace4.add_event(Event::new("Review Request", time).with_resource("Agent"));
+    trace4.add_event(Event::new("Execute Work", time).with_resource("Worker"));
+    trace4.add_event(Event::new("Complete", time).with_resource("System"));
+    log.add_trace(trace4);
+
+    // Case 5: Duplicate "Review" step
+    let mut trace5 = Trace::new("case-005-duplicate");
+    let time = Utc::now();
+    trace5.add_event(Event::new("Submit Request", time).with_resource("Customer"));
+    trace5.add_event(Event::new("Review Request", time).with_resource("Agent"));
+    trace5.add_event(Event::new("Review Request", time).with_resource("Senior Agent"));  // Duplicate
+    trace5.add_event(Event::new("Approve Request", time).with_resource("Manager"));
+    trace5.add_event(Event::new("Execute Work", time).with_resource("Worker"));
+    trace5.add_event(Event::new("Complete", time).with_resource("System"));
+    log.add_trace(trace5);
+
+    log
+}

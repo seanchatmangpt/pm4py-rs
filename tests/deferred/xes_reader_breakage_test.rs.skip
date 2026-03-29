@@ -1,0 +1,117 @@
+// TDD Test: EXPOSES that XESReader is broken
+// Following Joe Armstrong style: make it break, then fix it
+// Following Wil van der Aalst: process mining MUST work with real logs
+
+use pm4py::io::XESReader;
+use std::path::Path;
+
+#[test]
+fn test_xes_reader_actually_parses_traces() {
+    // GIVEN: A real XES file with 5 traces
+    let path = Path::new("/Users/sac/chatmangpt/test_simple.xes");
+
+    // WHEN: We read the file
+    let reader = XESReader::new();
+    let result = reader.read(path);
+
+    // THEN: It should NOT return an empty log
+    assert!(result.is_ok(), "XESReader should successfully read the file");
+
+    let log = result.unwrap();
+
+    // THIS MUST FAIL - exposes the bug
+    assert_eq!(
+        log.traces.len(),
+        5,
+        "XES file has 5 traces, but reader returned {} traces. \
+         XESReader.read() is a STUB that returns empty logs!",
+        log.traces.len()
+    );
+}
+
+#[test]
+fn test_xes_reader_actually_parses_events() {
+    // GIVEN: A real XES file with 15 events (5 traces × 3 events)
+    let path = Path::new("/Users/sac/chatmangpt/test_simple.xes");
+
+    // WHEN: We read the file
+    let reader = XESReader::new();
+    let log = reader.read(path).unwrap();
+
+    // Count total events
+    let event_count: usize = log.traces.iter().map(|t| t.events.len()).sum();
+
+    // THIS MUST FAIL - exposes the bug
+    assert_eq!(
+        event_count,
+        15,
+        "XES file has 15 events, but reader parsed {} events. \
+         XESReader.read() is a STUB that doesn't parse XML!",
+        event_count
+    );
+}
+
+#[test]
+fn test_xes_reader_actually_extracts_activity_names() {
+    // GIVEN: A real XES file with activities A, B, C
+    let path = Path::new("/Users/sac/chatmangpt/test_simple.xes");
+
+    // WHEN: We read the file
+    let reader = XESReader::new();
+    let log = reader.read(path).unwrap();
+
+    // Collect all activity names
+    let mut activities: Vec<String> = log
+        .traces
+        .iter()
+        .flat_map(|t| t.events.iter().map(|e| e.activity.clone()))
+        .collect();
+    activities.sort();
+    activities.dedup();
+
+    // THIS MUST FAIL - exposes the bug
+    assert_eq!(
+        activities.len(),
+        3,
+        "XES file has 3 unique activities (A, B, C), but reader found {} activities. \
+         XESReader doesn't parse event attributes!",
+        activities.len()
+    );
+
+    assert_eq!(
+        activities,
+        vec!["A", "B", "C"],
+        "Activities should be A, B, C but got {:?}",
+        activities
+    );
+}
+
+#[test]
+fn test_alpha_miner_on_xes_file() {
+    // GIVEN: A real XES file
+    let path = Path::new("/Users/sac/chatmangpt/test_simple.xes");
+
+    // WHEN: We read it and run Alpha Miner
+    let reader = XESReader::new();
+    let log = reader.read(path).unwrap();
+
+    use pm4py::discovery::AlphaMiner;
+    let miner = AlphaMiner::new();
+    let net = miner.discover(&log);
+
+    // Alpha Miner on empty log produces garbage
+    // THIS MUST FAIL - exposes that we can't do process mining on XES files
+    assert!(
+        net.transitions.len() > 0,
+        "Alpha Miner on A->B->C log should have transitions, but got {}. \
+         This proves XESReader returns EMPTY logs!",
+        net.transitions.len()
+    );
+
+    assert_eq!(
+        net.transitions.len(),
+        3,
+        "Should have 3 transitions (A, B, C), got {}",
+        net.transitions.len()
+    );
+}

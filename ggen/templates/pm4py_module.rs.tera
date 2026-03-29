@@ -1,0 +1,194 @@
+//! PyO3 bridge — auto-generated, DO NOT EDIT
+//! Source: pm4py-rust/ggen/ontology/pm4py-api.ttl
+//! Regenerate: cd pm4py-rust/ggen && ggen sync --from . --to ../src/python/generated
+//!
+//! Each function delegates to the Python pm4py library over PyO3.
+//! Failures propagate as PyResult::Err — callers decide whether to fallback.
+//!
+//! WvdA soundness: conformance functions cap log at 1,000 traces to bound runtime.
+//! Armstrong: let-it-crash — no silent fallbacks inside this module.
+
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
+use pyo3::prelude::*;
+use pyo3::types::PyAny;
+
+use crate::log::EventLog;
+use crate::models::PetriNet;
+use super::helpers::{eventlog_to_pm4py, pm4py_petri_to_rust, rust_petri_to_pm4py};
+
+{% for row in sparql_results %}
+{% set fn_name = row["?rustName"] | default(value="call_unknown") %}
+{% set py_name = row["?functionName"] | default(value="unknown") %}
+{% set call_style = row["?callStyle"] | default(value="log_only") %}
+{% set convert = row["?convertResult"] | default(value="unit") %}
+
+/// Bridge to `pm4py.{{ py_name }}()`
+///
+/// Call style: `{{ call_style }}` → convert: `{{ convert }}`
+pub fn {{ fn_name }}(
+    py: Python<'_>,
+{%- if call_style == "log_and_net" %}
+    log: &EventLog,
+    net: &PetriNet,
+{%- elif call_style == "io_read" %}
+    path: &str,
+{%- elif call_style == "io_write" %}
+    log: &EventLog,
+    path: &str,
+{%- elif call_style == "ocel_only" %}
+    ocel: &PyAny,
+{%- else %}
+    log: &EventLog,
+{%- endif %}
+) -> PyResult<{%- if convert == "petri_net_triple" %}PetriNet{%- elif convert == "f64" or convert == "list_dict" or convert == "fitness_dict" %}f64{%- elif convert == "event_log" %}EventLog{%- elif convert == "string" %}String{%- else %}(){%- endif %}> {
+    let pm4py = py.import("pm4py")?;
+{%- if call_style == "io_write" %}
+    let py_log = eventlog_to_pm4py(py, log)?;
+    pm4py.call_method1("{{ py_name }}", (py_log, path))?;
+    Ok(())
+{%- elif call_style == "io_read" %}
+    let result = pm4py.call_method1("{{ py_name }}", (path,))?;
+{%- if convert == "event_log" %}
+    super::helpers::pm4py_to_eventlog(py, result)
+{%- elif convert == "string" %}
+    result.extract::<String>()
+{%- else %}
+    let _ = result;
+    Ok(())
+{%- endif %}
+{%- elif call_style == "log_and_net" %}
+    // WvdA soundness: bound runtime — cap at 1,000 traces
+    const MAX_TRACES: usize = 1_000;
+    let truncated: EventLog;
+    let use_log: &EventLog = if log.traces.len() > MAX_TRACES {
+        truncated = {
+            let mut l = EventLog::new();
+            l.traces = log.traces[..MAX_TRACES].to_vec();
+            l
+        };
+        &truncated
+    } else {
+        log
+    };
+    let py_log = eventlog_to_pm4py(py, use_log)?;
+    let (py_net, py_im, py_fm) = rust_petri_to_pm4py(py, net)?;
+    let result = pm4py.call_method1("{{ py_name }}", (py_log, py_net, py_im, py_fm))?;
+{%- if convert == "list_dict" %}
+    // Extract list of dicts; try trace_fitness (TBR) then fitness (alignments)
+    let diagnostics: Vec<&PyAny> = result.extract()?;
+    if diagnostics.is_empty() {
+        return Ok(0.0);
+    }
+    let total: f64 = diagnostics
+        .iter()
+        .filter_map(|d| {
+            d.get_item("trace_fitness")
+                .ok()
+                .and_then(|v| v.extract::<f64>().ok())
+                .or_else(|| {
+                    d.get_item("fitness")
+                        .ok()
+                        .and_then(|v| v.extract::<f64>().ok())
+                })
+        })
+        .sum();
+    Ok(total / diagnostics.len() as f64)
+{%- elif convert == "fitness_dict" %}
+    // pm4py returns dict {"average_trace_fitness": f64, ...}; extract the key
+    result.get_item("average_trace_fitness")?.extract::<f64>()
+{%- elif convert == "f64" %}
+    result.extract::<f64>()
+{%- else %}
+    let _ = result;
+    Ok(())
+{%- endif %}
+{%- elif call_style == "log_and_model" %}
+    let py_log = eventlog_to_pm4py(py, log)?;
+    let discover_fn = "{{ py_name | replace(from="conformance_", to="discover_") }}";
+    let model = pm4py.call_method1(discover_fn, (py_log.as_ref(py),))?;
+    let result = pm4py.call_method1("{{ py_name }}", (py_log.as_ref(py), model))?;
+{%- if convert == "list_dict" %}
+    let diagnostics: Vec<&PyAny> = result.extract()?;
+    if diagnostics.is_empty() {
+        return Ok(0.0);
+    }
+    let total: f64 = diagnostics
+        .iter()
+        .filter_map(|d| {
+            d.get_item("dev_fitness")
+                .ok()
+                .and_then(|v| v.extract::<f64>().ok())
+        })
+        .sum();
+    Ok(total / diagnostics.len() as f64)
+{%- else %}
+    let _ = result;
+    Ok(())
+{%- endif %}
+{%- elif call_style == "ocel_only" %}
+    let result = pm4py.call_method1("{{ py_name }}", (ocel,))?;
+{%- if convert == "petri_net_triple" %}
+    // discover_oc_petri_net returns dict keyed by object type, not a tuple
+    let pns: &PyAny = result.get_item("petri_nets")?;
+    let first_ot = pns.call_method0("keys")?.iter()?.next()
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no object types in OC Petri net"))??;
+    let triple: &PyAny = pns.get_item(first_ot)?;
+    let net_obj: &PyAny = triple.get_item(0)?;
+    let im_obj: &PyAny = triple.get_item(1)?;
+    let fm_obj: &PyAny = triple.get_item(2)?;
+    pm4py_petri_to_rust(py, net_obj, im_obj, fm_obj)
+{%- elif convert == "list_dict" %}
+    let diagnostics: Vec<&PyAny> = result.extract()?;
+    if diagnostics.is_empty() { return Ok(0.0); }
+    let total: f64 = diagnostics.iter()
+        .filter_map(|d| d.get_item("trace_fitness").ok()?.extract::<f64>().ok())
+        .sum();
+    Ok(total / diagnostics.len() as f64)
+{%- elif convert == "f64" %}
+    result.extract::<f64>()
+{%- else %}
+    let _ = result;
+    Ok(())
+{%- endif %}
+{%- else %}
+    let py_log = eventlog_to_pm4py(py, log)?;
+    let result = pm4py.call_method1("{{ py_name }}", (py_log,))?;
+{%- if convert == "petri_net_triple" %}
+    let net_obj: &PyAny = result.get_item(0)?;
+    let im_obj: &PyAny = result.get_item(1)?;
+    let fm_obj: &PyAny = result.get_item(2)?;
+    pm4py_petri_to_rust(py, net_obj, im_obj, fm_obj)
+{%- elif convert == "f64" %}
+    result.extract::<f64>()
+{%- elif convert == "list_dict" %}
+    let diagnostics: Vec<&PyAny> = result.extract()?;
+    if diagnostics.is_empty() {
+        return Ok(0.0);
+    }
+    let total: f64 = diagnostics
+        .iter()
+        .filter_map(|d| {
+            d.get_item("trace_fitness")
+                .ok()
+                .and_then(|v| v.extract::<f64>().ok())
+                .or_else(|| {
+                    d.get_item("fitness")
+                        .ok()
+                        .and_then(|v| v.extract::<f64>().ok())
+                })
+        })
+        .sum();
+    Ok(total / diagnostics.len() as f64)
+{%- elif convert == "event_log" %}
+    super::helpers::pm4py_to_eventlog(py, result)
+{%- elif convert == "string" %}
+    result.extract::<String>()
+{%- else %}
+    let _ = result;
+    Ok(())
+{%- endif %}
+{%- endif %}
+}
+{% endfor %}

@@ -1,0 +1,760 @@
+openapi: 3.0.0
+info:
+  title: PM4Py REST API
+  description: |
+    Process Mining REST API providing event log discovery, conformance checking,
+    and performance analysis. Built on pm4py-rust for high-performance production workloads.
+  version: 1.0.0
+  contact:
+    name: ChatmanGPT
+    url: https://github.com/seanchatmangpt/pm4py-rust
+  license:
+    name: AGPL-3.0-or-later
+    url: https://opensource.org/licenses/AGPL-3.0
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Development server
+  - url: https://api.chatmangpt.com/api/v1
+    description: Production server
+
+# Authentication scheme for all endpoints
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication and rate limiting per tenant
+
+  schemas:
+    Event:
+      type: object
+      required:
+        - case_id
+        - activity
+        - timestamp
+      properties:
+        case_id:
+          type: string
+          description: Unique trace identifier
+          example: "order_12345"
+        activity:
+          type: string
+          description: Activity/event name
+          example: "receive_order"
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp
+          example: "2026-03-24T10:30:00Z"
+        resource:
+          type: string
+          description: Resource executing the activity
+          example: "clerk_john"
+        cost:
+          type: number
+          format: float
+          description: Cost associated with this activity
+          example: 50.00
+        attributes:
+          type: object
+          description: Additional event attributes
+          additionalProperties: true
+          example:
+            amount: 1000.00
+            priority: "high"
+            customer_type: "VIP"
+
+    EventLog:
+      type: object
+      required:
+        - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+          minItems: 1
+          description: List of events in chronological order
+        format:
+          type: string
+          enum: [json, csv, xes]
+          default: json
+          description: Format of the input log
+
+    PetriNetModel:
+      type: object
+      description: Discovered Petri Net process model
+      properties:
+        places:
+          type: array
+          items:
+            type: string
+          description: Place names in the Petri net
+          example: ["p0", "p1", "p2"]
+        transitions:
+          type: array
+          items:
+            type: string
+          description: Transition (activity) names
+          example: ["receive", "process", "complete"]
+        arcs:
+          type: array
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+              target:
+                type: string
+              type:
+                type: string
+                enum: [place_to_transition, transition_to_place]
+          description: Connections in the Petri net
+        initial_marking:
+          type: object
+          description: Initial token distribution
+        final_marking:
+          type: object
+          description: Expected final token distribution
+
+    ConformanceResult:
+      type: object
+      description: Conformance checking results
+      properties:
+        fitness:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Fitness score (proportion of perfectly replayed traces)
+          example: 0.95
+        precision:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Precision score (model specificity)
+          example: 0.92
+        generalization:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Generalization score (model coverage)
+          example: 0.88
+        simplicity:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Simplicity score (model complexity measure)
+          example: 0.85
+        deviant_traces:
+          type: array
+          items:
+            type: string
+          description: List of trace IDs that do not conform
+          example: ["trace_5", "trace_12"]
+        conformance_details:
+          type: object
+          description: Detailed conformance information per trace
+          additionalProperties:
+            type: object
+            properties:
+              conforms:
+                type: boolean
+              remaining_tokens:
+                type: integer
+              enabled_transitions:
+                type: array
+                items:
+                  type: string
+
+    LogStatistics:
+      type: object
+      description: Statistical metrics of event log
+      properties:
+        num_traces:
+          type: integer
+          example: 1000
+        num_events:
+          type: integer
+          example: 5420
+        num_activities:
+          type: integer
+          example: 23
+        trace_length_mean:
+          type: number
+          format: float
+          example: 5.42
+        trace_length_std:
+          type: number
+          format: float
+          example: 2.15
+        trace_length_min:
+          type: integer
+          example: 2
+        trace_length_max:
+          type: integer
+          example: 18
+        case_duration_mean:
+          type: string
+          format: duration
+          description: ISO 8601 duration
+          example: "PT2H30M"
+        case_duration_std:
+          type: string
+          format: duration
+          example: "PT45M"
+        activities:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              frequency:
+                type: integer
+              mean_duration:
+                type: string
+                format: duration
+          description: Activity-level statistics
+        variants:
+          type: array
+          items:
+            type: object
+            properties:
+              trace_pattern:
+                type: array
+                items:
+                  type: string
+              frequency:
+                type: integer
+              percentage:
+                type: number
+                format: float
+          description: Top trace variants with frequencies
+
+    ProcessTree:
+      type: object
+      description: Process tree representation of discovered model
+      properties:
+        root:
+          type: object
+          description: Root node of the tree
+          properties:
+            operator:
+              type: string
+              enum: [sequence, choice, parallel, loop]
+            children:
+              type: array
+              items:
+                $ref: '#/components/schemas/ProcessTree'
+            activity:
+              type: string
+              description: Activity name (for leaf nodes)
+
+    RateLimitInfo:
+      type: object
+      properties:
+        limit:
+          type: integer
+          description: Requests per hour
+          example: 10000
+        remaining:
+          type: integer
+          description: Remaining requests this hour
+          example: 9950
+        reset:
+          type: string
+          format: date-time
+          description: UTC time when limit resets
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+        - timestamp
+      properties:
+        error:
+          type: string
+          description: Error code
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Invalid event log format"
+        details:
+          type: object
+          description: Additional error context
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+        request_id:
+          type: string
+          description: Unique request identifier for support
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      tags:
+        - System
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  version:
+                    type: string
+                    example: "0.3.0"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /discover:
+    post:
+      summary: Discover process model from event log
+      description: |
+        Mines a process model (Petri Net) from an event log using specified discovery algorithm.
+
+        **Algorithms available:**
+        - `alpha`: Foundational algorithm for well-structured processes
+        - `inductive`: Recursive discovery with better loop handling
+        - `heuristic`: Frequency-threshold based discovery
+        - `dfg`: Directly-follows graph
+        - `causal_net`: Causal dependencies between activities
+        - `split_miner`: Advanced split point detection
+
+        **Rate limit:** 10,000 requests/hour per API key
+      tags:
+        - Discovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - log
+                - algorithm
+              properties:
+                log:
+                  $ref: '#/components/schemas/EventLog'
+                algorithm:
+                  type: string
+                  enum: [alpha, inductive, heuristic, dfg, causal_net, split_miner]
+                  default: inductive
+                  description: Discovery algorithm to use
+                parameters:
+                  type: object
+                  description: Algorithm-specific parameters
+                  properties:
+                    frequency_threshold:
+                      type: number
+                      format: float
+                      minimum: 0
+                      maximum: 1
+                      default: 0.1
+                      description: |
+                        Minimum frequency threshold for heuristic/DFG algorithms.
+                        Only edges with frequency >= threshold are included.
+                    min_edge_frequency:
+                      type: integer
+                      minimum: 1
+                      default: 1
+                    max_activity_distance:
+                      type: integer
+                      minimum: 1
+                      default: 10
+            example:
+              log:
+                events:
+                  - case_id: "order_1"
+                    activity: "receive"
+                    timestamp: "2026-03-24T10:00:00Z"
+                    resource: "clerk"
+                  - case_id: "order_1"
+                    activity: "process"
+                    timestamp: "2026-03-24T10:30:00Z"
+                    resource: "processor"
+                algorithm: inductive
+                parameters:
+                  frequency_threshold: 0.1
+      responses:
+        '200':
+          description: Process model successfully discovered
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+              description: Rate limit (requests per hour)
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+              description: Remaining requests this hour
+            X-RateLimit-Reset:
+              schema:
+                type: string
+                format: date-time
+              description: Rate limit reset time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  model:
+                    $ref: '#/components/schemas/PetriNetModel'
+                  algorithm:
+                    type: string
+                  num_places:
+                    type: integer
+                  num_transitions:
+                    type: integer
+                  processing_time_ms:
+                    type: number
+                    description: Server-side processing time in milliseconds
+
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "VALIDATION_ERROR"
+                message: "Event log must contain at least 1 event"
+                details:
+                  field: "log.events"
+                  constraint: "minItems: 1"
+                timestamp: "2026-03-24T10:00:00Z"
+                request_id: "req_abc123"
+
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '429':
+          description: Rate limit exceeded
+          headers:
+            X-RateLimit-Reset:
+              schema:
+                type: string
+                format: date-time
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "RATE_LIMIT_EXCEEDED"
+                message: "10000 requests/hour limit exceeded. Reset at 2026-03-24T11:00:00Z"
+                request_id: "req_abc123"
+
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "INTERNAL_SERVER_ERROR"
+                message: "Unexpected error during discovery"
+                request_id: "req_abc123"
+
+  /conform:
+    post:
+      summary: Check conformance of log against model
+      description: |
+        Evaluates fitness, precision, generalization, and simplicity of a log against a discovered or reference model.
+
+        Returns detailed metrics and identifies deviant traces.
+
+        **Rate limit:** 10,000 requests/hour per API key
+      tags:
+        - Conformance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - log
+                - model
+              properties:
+                log:
+                  $ref: '#/components/schemas/EventLog'
+                model:
+                  $ref: '#/components/schemas/PetriNetModel'
+                variant:
+                  type: string
+                  enum: [token_replay, alignment]
+                  default: token_replay
+                  description: Conformance checking algorithm
+      responses:
+        '200':
+          description: Conformance check completed
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+            X-RateLimit-Reset:
+              schema:
+                type: string
+                format: date-time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: '#/components/schemas/ConformanceResult'
+                  model_summary:
+                    type: object
+                    properties:
+                      num_places:
+                        type: integer
+                      num_transitions:
+                        type: integer
+                      num_arcs:
+                        type: integer
+                  processing_time_ms:
+                    type: number
+
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /analyze:
+    post:
+      summary: Analyze process model structure
+      description: |
+        Analyzes discovered or reference Petri Net model for:
+        - Soundness (proper termination properties)
+        - Behavioral profiles (activity relationships)
+        - Invariants and structural properties
+
+        **Rate limit:** 10,000 requests/hour per API key
+      tags:
+        - Analysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model
+              properties:
+                model:
+                  $ref: '#/components/schemas/PetriNetModel'
+      responses:
+        '200':
+          description: Analysis completed
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+            X-RateLimit-Reset:
+              schema:
+                type: string
+                format: date-time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_sound:
+                    type: boolean
+                    description: Whether model is sound (proper termination)
+                  behavioral_profile:
+                    type: object
+                    description: Activity relationship analysis
+                    properties:
+                      causality:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            activity_a:
+                              type: string
+                            activity_b:
+                              type: string
+                            relationship:
+                              type: string
+                              enum: [sequential, concurrent, inverse_sequential]
+                      strongly_connected_components:
+                        type: integer
+                      longest_path:
+                        type: integer
+                  deadlock_potential:
+                    type: array
+                    items:
+                      type: object
+                      description: Potential deadlock configurations
+                  processing_time_ms:
+                    type: number
+
+        '400':
+          description: Invalid model
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /stats:
+    post:
+      summary: Extract statistics from event log
+      description: |
+        Computes comprehensive statistics from an event log:
+        - Trace and event counts
+        - Trace length distributions
+        - Case duration analysis
+        - Activity-level metrics
+        - Top variants
+
+        **Rate limit:** 10,000 requests/hour per API key
+      tags:
+        - Statistics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - log
+              properties:
+                log:
+                  $ref: '#/components/schemas/EventLog'
+      responses:
+        '200':
+          description: Statistics computed
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+            X-RateLimit-Reset:
+              schema:
+                type: string
+                format: date-time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stats:
+                    $ref: '#/components/schemas/LogStatistics'
+                  processing_time_ms:
+                    type: number
+
+        '400':
+          description: Invalid log
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+tags:
+  - name: System
+    description: System health and status
+  - name: Discovery
+    description: Process model discovery algorithms
+  - name: Conformance
+    description: Conformance checking against models
+  - name: Analysis
+    description: Process model structure analysis
+  - name: Statistics
+    description: Event log statistical analysis

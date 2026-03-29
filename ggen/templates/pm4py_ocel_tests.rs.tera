@@ -1,0 +1,73 @@
+#![allow(dropping_references, clippy::redundant_closure_call)]
+//! pm4py OCEL function tests — auto-generated, DO NOT EDIT
+//! Source: pm4py-rust/ggen/ontology/pm4py-api.ttl
+//! Regenerate: cd pm4py-rust/ggen && /Users/sac/ggen/target/release/ggen sync --manifest ggen.toml
+//!
+//! Uses a synthetic OCEL created via pm4py.convert_log_to_ocel() from the
+//! running-example XES fixture.  Skips gracefully when pm4py is unavailable.
+
+#![cfg(test)]
+#![allow(deprecated, dead_code, unused_variables, unused_imports)]
+
+use pm4py::log::{EventLog, Trace, Event};
+use pm4py::models::{PetriNet, Place, Transition, Arc};
+use chrono::Utc;
+
+// ── Runtime guard ────────────────────────────────────────────────────────────
+
+#[allow(deprecated)]
+fn pm4py_available() -> bool {
+    pyo3::prepare_freethreaded_python();
+    pyo3::Python::with_gil(|py| {
+        py.import("pm4py").is_ok() && py.import("pandas").is_ok()
+    })
+}
+
+// ── Test data paths ───────────────────────────────────────────────────────────
+
+const XES_PATH: &str = "test_data/running-example.xes";
+
+// ── OCEL fixture ─────────────────────────────────────────────────────────────
+
+/// Create a synthetic OCEL from the running-example XES log.
+/// Uses pm4py.convert_log_to_ocel() to produce a real pm4py OCEL object.
+#[allow(deprecated)]
+fn synthetic_ocel_object(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::PyObject> {
+    let pm4py_mod = py.import("pm4py")?;
+    let log = pm4py_mod.call_method1("read_xes", (XES_PATH,))?;
+    let ocel = pm4py_mod.call_method1("convert_log_to_ocel", (log,))?;
+    Ok(ocel.into())
+}
+
+// ── Generated OCEL tests ─────────────────────────────────────────────────────
+
+{% for row in sparql_results %}
+{% set fn_name    = row["?rustName"]      | default(value="call_unknown") %}
+{% set py_name    = row["?pyName"]        | default(value="unknown") %}
+{% set convert    = row["?convertResult"] | default(value="unit") %}
+{% set module     = row["?module"]        | default(value="ocpm") %}
+
+#[test]
+fn {{ fn_name }}_ocel_official() {
+    if !pm4py_available() {
+        eprintln!("SKIP {{ fn_name }}_ocel_official: pm4py not available");
+        return;
+    }
+    let result = pyo3::Python::with_gil(|py| {
+        let ocel_obj = synthetic_ocel_object(py)?;
+        let ocel: &pyo3::types::PyAny = ocel_obj.as_ref(py);
+        pm4py::python::generated::{{ module }}::{{ fn_name }}(py, ocel)
+    });
+{%- if convert == "petri_net_triple" %}
+    let discovered = result.expect("{{ py_name }} failed");
+    assert!(!discovered.places.is_empty(),
+        "{{ py_name }}: PetriNet must have places");
+    assert!(!discovered.transitions.is_empty(),
+        "{{ py_name }}: PetriNet must have transitions");
+{%- elif convert == "event_log" %}
+    result.expect("{{ py_name }} failed");
+{%- else %}
+    result.expect("{{ py_name }} failed");
+{%- endif %}
+}
+{% endfor %}

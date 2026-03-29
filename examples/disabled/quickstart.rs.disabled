@@ -1,0 +1,91 @@
+//! PM4Py Rust - Quick Start Example
+//!
+//! This example demonstrates the basic workflow of process mining:
+//! 1. Create an event log
+//! 2. Discover a process model
+//! 3. Check conformance
+//! 4. Analyze statistics
+//!
+//! Run with: cargo run --example quickstart
+
+use pm4py::log::{EventLog, Trace, Event};
+use pm4py::discovery::alpha_miner::AlphaMiner;
+use pm4py::conformance::token_replay::TokenReplay;
+use pm4py::statistics::log_statistics::LogStatistics;
+use chrono::Utc;
+
+fn main() {
+    println!("╔════════════════════════════════════════════╗");
+    println!("║   PM4Py Rust - Quick Start Example         ║");
+    println!("╚════════════════════════════════════════════╝\n");
+
+    // Step 1: Create a sample event log
+    println!("STEP 1: Creating event log...");
+    let log = create_sample_log();
+    println!("✓ Created log with {} traces\n", log.traces().len());
+
+    // Step 2: Compute statistics
+    println!("STEP 2: Computing statistics...");
+    let stats = LogStatistics::compute(&log);
+    println!("✓ Total traces: {}", log.traces().len());
+    println!("✓ Total events: {}", log.num_events());
+    println!("✓ Unique activities: {}\n", stats.num_activities());
+
+    // Step 3: Discover process model
+    println!("STEP 3: Discovering process model...");
+    let miner = AlphaMiner::new();
+    let petri_net = miner.mine_from_log(&log);
+    println!("✓ Discovered model:");
+    println!("  Places: {}", petri_net.places.len());
+    println!("  Transitions: {}\n", petri_net.transitions.len());
+
+    // Step 4: Check conformance
+    println!("STEP 4: Checking conformance...");
+    let checker = TokenReplay::new();
+    let fitness = checker.check_log_fitness(&log, &petri_net);
+    println!("✓ Fitness: {:.1}%", fitness * 100.0);
+
+    if fitness >= 0.95 {
+        println!("  Status: ✅ Excellent conformance");
+    } else if fitness >= 0.8 {
+        println!("  Status: ⚠️  Good conformance (some deviations)");
+    } else {
+        println!("  Status: ❌ Poor conformance (many deviations)");
+    }
+
+    println!("\n╔════════════════════════════════════════════╗");
+    println!("║   Quick Start Complete!                   ║");
+    println!("║                                            ║");
+    println!("║   Next steps:                              ║");
+    println!("║   - Try different algorithms               ║");
+    println!("║   - Load real data from CSV/XES            ║");
+    println!("║   - Explore the documentation              ║");
+    println!("╚════════════════════════════════════════════╝");
+}
+
+/// Create a sample event log representing an order processing process
+fn create_sample_log() -> EventLog {
+    let mut log = EventLog::new();
+    let base = Utc::now();
+
+    // Create 10 sample order traces
+    for i in 1..=10 {
+        let mut trace = Trace::new(format!("order_{:03}", i));
+        let offset = base + chrono::Duration::hours(i as i64);
+
+        // Each order goes through these activities
+        trace.add_event(Event::new("Order Received".to_string(), offset));
+        trace.add_event(Event::new(
+            "Payment Processed".to_string(),
+            offset + chrono::Duration::minutes(30),
+        ));
+        trace.add_event(Event::new(
+            "Item Shipped".to_string(),
+            offset + chrono::Duration::hours(2),
+        ));
+
+        log.add_trace(trace);
+    }
+
+    log
+}

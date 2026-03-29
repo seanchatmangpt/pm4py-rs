@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.1//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_1.dtd'>
+<nta>
+    <declaration>
+    // Global declarations for pm4py-rust WvdA Soundness Model
+
+    // Configuration constants from businessos_gateway.rs
+    const int TIMEOUT_MS = 5000;
+    const int MAX_RETRIES = 3;
+    const int RETRY_DELAY_MS = 100;
+    const int PREPARE_TIMEOUT_SECS = 30;
+    const int COMMIT_TIMEOUT_SECS = 60;
+
+    // Clock for timeout verification
+    clock t;
+
+    // Message passing channels
+    chan request, response, prepare, prepare_ack, commit, commit_ack, abort, abort_ack;
+
+    // Error types
+    typedef enum {
+        OK, TIMEOUT, CONNECTION_FAILED, RETRY_LIMIT
+    } ErrorType;
+
+    // Transaction states
+    typedef enum {
+        INITIAL, PENDING, PREPARING, COMMITTING, ABORTING, COMMITTED, ABORTED
+    } TransactionState;
+
+    // Participant votes
+    typedef enum {
+        READY, VOTE_ABORT
+    } ParticipantVote;
+    </declaration>
+
+    <template>
+        <name x="0" y="0">HTTPGateway</name>
+        <declaration>
+        // HTTP Gateway process (simulating discover/conformance/stats endpoints)
+        int retry_count = 0;
+        int attempts = 0;
+        </declaration>
+        <location id="id_init" x="0" y="0">
+            <name x="-60" y="-30">init</name>
+        </location>
+        <location id="id_request_ready" x="120" y="0">
+            <name x="80" y="-30">request_ready</name>
+        </location>
+        <location id="id_request_sent" x="240" y="0">
+            <name x="200" y="-30">request_sent</name>
+            <invariant>t &lt;= TIMEOUT_MS</invariant>
+        </location>
+        <location id="id_response_received" x="360" y="0">
+            <name x="300" y="-30">response_received</name>
+        </location>
+        <location id="id_timeout" x="240" y="-120">
+            <name x="200" y="-150">timeout</name>
+        </location>
+        <location id="id_retry_check" x="120" y="-120">
+            <name x="60" y="-150">retry_check</name>
+        </location>
+        <location id="id_error" x="0" y="-120">
+            <name x="-60" y="-150">error</name>
+        </location>
+        <location id="id_done" x="480" y="0">
+            <name x="420" y="-30">done</name>
+        </location>
+
+        <init ref="id_init"/>
+
+        <transition>
+            <source ref="id_init"/>
+            <target ref="id_request_ready"/>
+            <label x="30" y="-10">gateway_ready</label>
+        </transition>
+
+        <transition>
+            <source ref="id_request_ready"/>
+            <target ref="id_request_sent"/>
+            <label x="150" y="-10">request!</label>
+            <assignment>t=0, retry_count=0</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_request_sent"/>
+            <target ref="id_response_received"/>
+            <label x="290" y="20">response?, t &lt; TIMEOUT_MS</label>
+        </transition>
+
+        <transition>
+            <source ref="id_request_sent"/>
+            <target ref="id_timeout"/>
+            <label x="270" y="-60">t &gt;= TIMEOUT_MS</label>
+        </transition>
+
+        <transition>
+            <source ref="id_timeout"/>
+            <target ref="id_retry_check"/>
+            <label x="150" y="-120">handle_timeout</label>
+        </transition>
+
+        <transition>
+            <source ref="id_retry_check"/>
+            <target ref="id_request_ready"/>
+            <label x="80" y="-60">retry_count &lt; MAX_RETRIES</label>
+            <assignment>retry_count++, t=0</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_retry_check"/>
+            <target ref="id_error"/>
+            <label x="60" y="-150">retry_count &gt;= MAX_RETRIES</label>
+        </transition>
+
+        <transition>
+            <source ref="id_response_received"/>
+            <target ref="id_done"/>
+            <label x="410" y="20">success</label>
+        </transition>
+
+        <transition>
+            <source ref="id_error"/>
+            <target ref="id_done"/>
+            <label x="200" y="-140">return_error</label>
+        </transition>
+    </template>
+
+    <template>
+        <name x="0" y="250">TransactionCoordinator</name>
+        <declaration>
+        // Two-Phase Commit Coordinator
+        int participant_ready_count = 0;
+        int total_participants = 2;
+        TransactionState state = INITIAL;
+        </declaration>
+        <location id="id_coord_init" x="0" y="250">
+            <name x="-60" y="220">init</name>
+        </location>
+        <location id="id_coord_pending" x="120" y="250">
+            <name x="80" y="220">pending</name>
+        </location>
+        <location id="id_coord_preparing" x="240" y="250">
+            <name x="200" y="220">preparing</name>
+            <invariant>t &lt;= PREPARE_TIMEOUT_SECS * 1000</invariant>
+        </location>
+        <location id="id_coord_committing" x="360" y="250">
+            <name x="300" y="220">committing</name>
+            <invariant>t &lt;= COMMIT_TIMEOUT_SECS * 1000</invariant>
+        </location>
+        <location id="id_coord_committed" x="480" y="250">
+            <name x="420" y="220">committed</name>
+        </location>
+        <location id="id_coord_aborting" x="360" y="380">
+            <name x="300" y="350">aborting</name>
+        </location>
+        <location id="id_coord_aborted" x="480" y="380">
+            <name x="420" y="350">aborted</name>
+        </location>
+
+        <init ref="id_coord_init"/>
+
+        <transition>
+            <source ref="id_coord_init"/>
+            <target ref="id_coord_pending"/>
+            <label x="30" y="240">begin_transaction</label>
+            <assignment>state=PENDING</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_pending"/>
+            <target ref="id_coord_preparing"/>
+            <label x="150" y="240">send_prepare_requests</label>
+            <assignment>state=PREPARING, t=0, participant_ready_count=0</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_preparing"/>
+            <target ref="id_coord_preparing"/>
+            <label x="250" y="280">prepare_ack?, participant_ready_count &lt; total_participants</label>
+            <assignment>participant_ready_count++</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_preparing"/>
+            <target ref="id_coord_committing"/>
+            <label x="290" y="240">participant_ready_count == total_participants</label>
+            <assignment>state=COMMITTING, t=0</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_preparing"/>
+            <target ref="id_coord_aborting"/>
+            <label x="240" y="320">prepare_abort! || t &gt;= PREPARE_TIMEOUT_SECS * 1000</label>
+            <assignment>state=ABORTING</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_committing"/>
+            <target ref="id_coord_committed"/>
+            <label x="410" y="240">commit_ack?</label>
+            <assignment>state=COMMITTED</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_committing"/>
+            <target ref="id_coord_aborting"/>
+            <label x="310" y="320">t &gt;= COMMIT_TIMEOUT_SECS * 1000</label>
+            <assignment>state=ABORTING</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_coord_aborting"/>
+            <target ref="id_coord_aborted"/>
+            <label x="410" y="380">abort_ack?</label>
+            <assignment>state=ABORTED</assignment>
+        </transition>
+    </template>
+
+    <template>
+        <name x="600" y="250">Participant</name>
+        <declaration>
+        // Participant in Two-Phase Commit
+        ParticipantVote vote = READY;
+        </declaration>
+        <location id="id_part_init" x="600" y="250">
+            <name x="540" y="220">init</name>
+        </location>
+        <location id="id_part_waiting" x="720" y="250">
+            <name x="660" y="220">waiting_prepare</name>
+        </location>
+        <location id="id_part_validating" x="840" y="250">
+            <name x="760" y="220">validating</name>
+            <invariant>t &lt;= 1000</invariant>
+        </location>
+        <location id="id_part_ready" x="960" y="250">
+            <name x="900" y="220">ready</name>
+        </location>
+        <location id="id_part_abort_state" x="840" y="380">
+            <name x="760" y="350">abort_state</name>
+        </location>
+        <location id="id_part_done" x="1080" y="250">
+            <name x="1020" y="220">done</name>
+        </location>
+
+        <init ref="id_part_init"/>
+
+        <transition>
+            <source ref="id_part_init"/>
+            <target ref="id_part_waiting"/>
+            <label x="630" y="240">participant_ready</label>
+        </transition>
+
+        <transition>
+            <source ref="id_part_waiting"/>
+            <target ref="id_part_validating"/>
+            <label x="770" y="240">prepare?</label>
+            <assignment>t=0</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_part_validating"/>
+            <target ref="id_part_ready"/>
+            <label x="890" y="240">validation_ok</label>
+            <assignment>vote=READY</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_part_validating"/>
+            <target ref="id_part_abort_state"/>
+            <label x="880" y="320">validation_fail</label>
+            <assignment>vote=VOTE_ABORT</assignment>
+        </transition>
+
+        <transition>
+            <source ref="id_part_ready"/>
+            <target ref="id_part_done"/>
+            <label x="1010" y="240">prepare_ack!</label>
+        </transition>
+
+        <transition>
+            <source ref="id_part_abort_state"/>
+            <target ref="id_part_done"/>
+            <label x="950" y="380">prepare_abort!</label>
+        </transition>
+    </template>
+
+    <system>
+    // System composition: HTTP Gateway + Coordinator + Participants
+    gateway = HTTPGateway();
+    coordinator = TransactionCoordinator();
+    participant1 = Participant();
+    participant2 = Participant();
+
+    system gateway, coordinator, participant1, participant2;
+    </system>
+
+    <!-- VERIFICATION PROPERTIES -->
+
+    <!-- Property 1: DEADLOCK FREEDOM -->
+    <!-- A[] not deadlock
+         Meaning: In all reachable states, there is no global deadlock
+         Expected: PASS (timeout prevents indefinite waits)
+    -->
+
+    <!-- Property 2: LIVENESS - Gateway completes -->
+    <!-- A<> (gateway.done)
+         Meaning: Gateway eventually reaches done state
+         Expected: PASS (timeout + retry limit ensure termination)
+    -->
+
+    <!-- Property 3: LIVENESS - Coordinator commits or aborts -->
+    <!-- A<> (coordinator.committed || coordinator.aborted)
+         Meaning: Coordinator eventually reaches terminal state
+         Expected: PASS (2PC guarantees atomicity)
+    -->
+
+    <!-- Property 4: TIMEOUT SAFETY -->
+    <!-- A[] (gateway.request_sent && t > TIMEOUT_MS) --> gateway.timeout
+         Meaning: If timeout elapses in request_sent, transition to timeout occurs
+         Expected: PASS (invariant t <= TIMEOUT_MS enforces this)
+    -->
+
+    <!-- Property 5: RETRY BOUND -->
+    <!-- A[] (gateway.retry_count <= MAX_RETRIES)
+         Meaning: Retry count never exceeds maximum
+         Expected: PASS (retry_count++ only in transition guard retry_count < MAX_RETRIES)
+    -->
+
+    <!-- Property 6: 2PC ATOMICITY -->
+    <!-- (coordinator.preparing && participant1.ready && participant2.ready) --> coordinator.committed
+         (coordinator.preparing && (participant1.abort_state || participant2.abort_state)) --> coordinator.aborted
+         Meaning: Atomic decision (all commit or all abort)
+         Expected: PASS (coordinator waits for all participants)
+    -->
+
+    <!-- Property 7: NO EARLY COMMIT -->
+    <!-- A[] (coordinator.committing --> (participant1.done && participant2.done))
+         Meaning: Coordinator doesn't commit until all participants acked
+         Expected: PASS (synchronous channel communication)
+    -->
+
+</nta>

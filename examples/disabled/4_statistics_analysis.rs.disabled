@@ -1,0 +1,500 @@
+//! Statistics Analysis Example
+//!
+//! This example demonstrates statistical analysis of event logs, including:
+//! - Basic log statistics
+//! - Performance metrics (cycle time, case duration)
+//! - Organizational analysis (resource workload)
+//! - Temporal analysis (business hours, workload distribution)
+//!
+//! Run: cargo run --example 4_statistics_analysis
+
+use chrono::{Duration, Timelike, Utc, Weekday};
+use pm4py::log::{EventLog, Event, Trace};
+use pm4py::statistics::*;
+use std::collections::{HashMap, HashSet};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Statistics Analysis Example ===\n");
+
+    // Step 1: Create a realistic event log
+    println!("Step 1: Creating realistic event log...");
+    let log = create_realistic_log();
+
+    println!("✓ Created log with {} traces and {} events",
+        log.traces.len(),
+        log.total_events()
+    );
+    println!();
+
+    // Step 2: Basic log statistics
+    println!("Step 2: Basic log statistics");
+    let stats = LogStatistics::calculate(&log);
+
+    println!("  Cases (traces): {}", stats.case_count);
+    println!("  Events: {}", stats.event_count);
+    println!("  Unique activities: {}", stats.unique_activities);
+    println!("  Unique resources: {}", stats.unique_resources);
+    println!("  Avg events per case: {:.1}", stats.avg_events_per_case);
+    println!("  Avg case duration: {:.2} hours", stats.avg_case_duration_hours);
+    println!();
+
+    // Step 3: Activity frequency analysis
+    println!("Step 3: Activity frequency analysis");
+    let activity_freq = analyze_activity_frequency(&log);
+
+    println!("  {:<25} {:>12} {:>12}", "Activity", "Count", "Pct");
+    println!("  {}", "-".repeat(51));
+
+    for (activity, count) in activity_freq.iter().take(10) {
+        let pct = (*count as f64 / log.total_events() as f64) * 100.0;
+        println!("  {:<25} {:>12} {:>11.1}%", activity, count, pct);
+    }
+    println!();
+
+    // Step 4: Resource workload analysis
+    println!("Step 4: Resource workload analysis");
+    let resource_workload = analyze_resource_workload(&log);
+
+    println!("  {:<20} {:>12} {:>12} {:>12}", "Resource", "Tasks", "Avg/Day", "Utilization");
+    println!("  {}", "-".repeat(60));
+
+    let mut workload_vec: Vec<_> = resource_workload.iter().collect();
+    workload_vec.sort_by(|a, b| b.1.total_tasks.cmp(&a.1.total_tasks));
+
+    for (resource, data) in workload_vec.iter().take(5) {
+        let utilization = if data.total_tasks > 0 {
+            (data.total_tasks as f64 / 100.0) * 100.0  // Assuming 100 tasks/day capacity
+        } else {
+            0.0
+        };
+        println!("  {:<20} {:>12} {:>12.1} {:>11.1}%",
+            resource,
+            data.total_tasks,
+            data.avg_tasks_per_day,
+            utilization
+        );
+    }
+    println!();
+
+    // Step 5: Case duration analysis
+    println!("Step 5: Case duration analysis");
+    let durations = analyze_case_durations(&log);
+
+    println!("  Min duration: {:.2} hours", durations.min_hours);
+    println!("  Max duration: {:.2} hours", durations.max_hours);
+    println!("  Mean duration: {:.2} hours", durations.mean_hours);
+    println!("  Median duration: {:.2} hours", durations.median_hours);
+    println!("  Std deviation: {:.2} hours", durations.stddev_hours);
+    println!();
+
+    // Step 6: Temporal analysis - workload by day of week
+    println!("Step 6: Workload distribution by day of week");
+    let dow_distribution = analyze_day_of_week_distribution(&log);
+
+    println!("  {:<15} {:>12}", "Day", "Events");
+    println!("  {}", "-".repeat(29));
+
+    let days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    for (i, day) in days.iter().enumerate() {
+        let count = dow_distribution.get(&i).unwrap_or(&0);
+        println!("  {:<15} {:>12}", day, count);
+    }
+    println!();
+
+    // Step 7: Temporal analysis - workload by hour
+    println!("Step 7: Workload distribution by hour (business hours)");
+    let hourly_dist = analyze_hourly_distribution(&log);
+
+    println!("  {:<10} {:>10}", "Hour", "Events");
+    println!("  {}", "-".repeat(22));
+
+    for hour in 8..18 {  // Business hours: 8 AM to 6 PM
+        let count = hourly_dist.get(&hour).unwrap_or(&0);
+        let bar = "█".repeat((*count as f64 / 20.0).ceil() as usize);
+        println!("  {:<4}00     {:>6}  {}", hour, count, bar);
+    }
+    println!();
+
+    // Step 8: Bottleneck analysis
+    println!("Step 8: Bottleneck analysis (longest activities)");
+    let bottlenecks = analyze_bottlenecks(&log);
+
+    println!("  {:<25} {:>15} {:>15}", "Activity", "Avg Duration", "Max Duration");
+    println!("  {}", "-".repeat(57));
+
+    for (activity, avg_ms, max_ms) in bottlenecks.iter().take(5) {
+        println!("  {:<25} {:>10.2}s {:>10.2}s",
+            activity,
+            *avg_ms as f64 / 1000.0,
+            *max_ms as f64 / 1000.0
+        );
+    }
+    println!();
+
+    // Step 9: Variant analysis
+    println!("Step 9: Variant analysis");
+    use pm4py::discovery::VariantAnalysis;
+    let variants = VariantAnalysis::analyze(&log);
+
+    println!("  Total variants: {}", variants.len());
+    println!("  Top 5 variants:");
+    for (i, variant) in variants.iter().take(5).enumerate() {
+        let pct = (variant.count as f64 / log.traces.len() as f64) * 100.0;
+        println!("    {}. {} cases ({:.1}%) - {}",
+            i + 1,
+            variant.count,
+            pct,
+            variant.signature
+        );
+    }
+    println!();
+
+    // Step 10: Recommendations
+    println!("Step 10: Key insights and recommendations");
+    generate_recommendations(&log, &stats, &resource_workload);
+
+    println!("\n=== Statistics analysis complete ===");
+    Ok(())
+}
+
+/// Calculate basic log statistics
+struct LogStatistics {
+    case_count: usize,
+    event_count: usize,
+    unique_activities: usize,
+    unique_resources: usize,
+    avg_events_per_case: f64,
+    avg_case_duration_hours: f64,
+}
+
+impl LogStatistics {
+    fn calculate(log: &EventLog) -> Self {
+        let case_count = log.traces.len();
+        let event_count = log.total_events();
+
+        let mut activities = HashSet::new();
+        let mut resources = HashSet::new();
+
+        for trace in &log.traces {
+            for event in &trace.events {
+                activities.insert(&event.activity);
+                if let Some(ref resource) = event.resource {
+                    resources.insert(resource.as_str());
+                }
+            }
+        }
+
+        let avg_events_per_case = if case_count > 0 {
+            event_count as f64 / case_count as f64
+        } else {
+            0.0
+        };
+
+        // Calculate average case duration
+        let mut total_duration_hours = 0.0;
+        let mut valid_durations = 0;
+
+        for trace in &log.traces {
+            if let (Some(first), Some(last)) = (trace.events.first(), trace.events.last()) {
+                let duration = last.timestamp.signed_duration_since(first.timestamp);
+                total_duration_hours += duration.num_hours() as f64;
+                valid_durations += 1;
+            }
+        }
+
+        let avg_case_duration_hours = if valid_durations > 0 {
+            total_duration_hours / valid_durations as f64
+        } else {
+            0.0
+        };
+
+        Self {
+            case_count,
+            event_count,
+            unique_activities: activities.len(),
+            unique_resources: resources.len(),
+            avg_events_per_case,
+            avg_case_duration_hours,
+        }
+    }
+}
+
+/// Analyze activity frequency
+fn analyze_activity_frequency(log: &EventLog) -> Vec<(String, usize)> {
+    let mut freq: HashMap<String, usize> = HashMap::new();
+
+    for trace in &log.traces {
+        for event in &trace.events {
+            *freq.entry(event.activity.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut vec: Vec<_> = freq.into_iter().collect();
+    vec.sort_by(|a, b| b.1.cmp(&a.1));
+    vec
+}
+
+/// Resource workload data
+struct ResourceWorkload {
+    total_tasks: usize,
+    avg_tasks_per_day: f64,
+}
+
+/// Analyze resource workload
+fn analyze_resource_workload(log: &EventLog) -> HashMap<String, ResourceWorkload> {
+    let mut resource_tasks: HashMap<String, usize> = HashMap::new();
+    let mut resource_days: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for trace in &log.traces {
+        for event in &trace.events {
+            if let Some(ref resource) = event.resource {
+                *resource_tasks.entry(resource.clone()).or_insert(0) += 1;
+
+                // Track unique days worked
+                let day_key = event.timestamp.format("%Y-%m-%d").to_string();
+                resource_days
+                    .entry(resource.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(day_key);
+            }
+        }
+    }
+
+    let mut result = HashMap::new();
+    for (resource, tasks) in resource_tasks {
+        let days_worked = resource_days.get(&resource).map(|s| s.len()).unwrap_or(1);
+        let avg_per_day = tasks as f64 / days_worked as f64;
+
+        result.insert(resource, ResourceWorkload {
+            total_tasks: tasks,
+            avg_tasks_per_day: avg_per_day,
+        });
+    }
+
+    result
+}
+
+/// Case duration statistics
+struct CaseDurationStats {
+    min_hours: f64,
+    max_hours: f64,
+    mean_hours: f64,
+    median_hours: f64,
+    stddev_hours: f64,
+}
+
+/// Analyze case durations
+fn analyze_case_durations(log: &EventLog) -> CaseDurationStats {
+    let mut durations = Vec::new();
+
+    for trace in &log.traces {
+        if let (Some(first), Some(last)) = (trace.events.first(), trace.events.last()) {
+            let duration = last.timestamp.signed_duration_since(first.timestamp);
+            durations.push(duration.num_hours() as f64);
+        }
+    }
+
+    if durations.is_empty() {
+        return CaseDurationStats {
+            min_hours: 0.0,
+            max_hours: 0.0,
+            mean_hours: 0.0,
+            median_hours: 0.0,
+            stddev_hours: 0.0,
+        };
+    }
+
+    durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let min = durations.first().unwrap();
+    let max = durations.last().unwrap();
+    let mean = durations.iter().sum::<f64>() / durations.len() as f64;
+
+    let median = if durations.len() % 2 == 0 {
+        (durations[durations.len() / 2 - 1] + durations[durations.len() / 2]) / 2.0
+    } else {
+        durations[durations.len() / 2]
+    };
+
+    let variance = durations.iter()
+        .map(|d| (d - mean).powi(2))
+        .sum::<f64>() / durations.len() as f64;
+
+    CaseDurationStats {
+        min_hours: *min,
+        max_hours: *max,
+        mean_hours: mean,
+        median_hours: median,
+        stddev_hours: variance.sqrt(),
+    }
+}
+
+/// Analyze day of week distribution
+fn analyze_day_of_week_distribution(log: &EventLog) -> HashMap<usize, usize> {
+    let mut distribution = HashMap::new();
+
+    for trace in &log.traces {
+        for event in &trace.events {
+            let weekday = event.timestamp.weekday().num_days_from_monday();
+            *distribution.entry(weekday).or_insert(0) += 1;
+        }
+    }
+
+    distribution
+}
+
+/// Analyze hourly distribution
+fn analyze_hourly_distribution(log: &EventLog) -> HashMap<u32, usize> {
+    let mut distribution = HashMap::new();
+
+    for trace in &log.traces {
+        for event in &trace.events {
+            let hour = event.timestamp.hour();
+            *distribution.entry(hour).or_insert(0) += 1;
+        }
+    }
+
+    distribution
+}
+
+/// Analyze bottlenecks (longest activities)
+fn analyze_bottlenecks(log: &EventLog) -> Vec<(String, f64, f64)> {
+    let mut activity_durations: HashMap<String, Vec<i64>> = HashMap::new();
+
+    for trace in &log.traces {
+        for i in 0..trace.events.len() {
+            let event = &trace.events[i];
+
+            // Calculate duration from previous event
+            let duration_ms = if i > 0 {
+                let prev = &trace.events[i - 1];
+                prev.timestamp.signed_duration_since(event.timestamp).num_milliseconds().abs()
+            } else {
+                0
+            };
+
+            activity_durations
+                .entry(event.activity.clone())
+                .or_insert_with(Vec::new)
+                .push(duration_ms);
+        }
+    }
+
+    let mut results = Vec::new();
+    for (activity, durations) in activity_durations {
+        let avg = durations.iter().sum::<i64>() as f64 / durations.len() as f64;
+        let max = *durations.iter().max().unwrap_or(&0) as f64;
+        results.push((activity, avg, max));
+    }
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    results
+}
+
+/// Generate recommendations based on analysis
+fn generate_recommendations(
+    log: &EventLog,
+    stats: &LogStatistics,
+    workload: &HashMap<String, ResourceWorkload>,
+) {
+    println!("  🔍 Process complexity:");
+    if stats.unique_activities > 15 {
+        println!("     ⚠ High process complexity ({} activities)", stats.unique_activities);
+        println!("       Consider process simplification or segmentation");
+    } else {
+        println!("     ✓ Reasonable process complexity ({} activities)", stats.unique_activities);
+    }
+
+    println!("\n  🔍 Case duration:");
+    if stats.avg_case_duration_hours > 72.0 {
+        println!("     ⚠ Long average case duration ({:.1} hours)", stats.avg_case_duration_hours);
+        println!("       Investigate bottlenecks and consider process automation");
+    } else {
+        println!("     ✓ Acceptable case duration ({:.1} hours)", stats.avg_case_duration_hours);
+    }
+
+    println!("\n  🔍 Resource utilization:");
+    let overloaded: Vec<_> = workload.iter()
+        .filter(|(_, data)| data.avg_tasks_per_day > 50.0)
+        .collect();
+
+    if !overloaded.is_empty() {
+        println!("     ⚠ Potentially overloaded resources:");
+        for (resource, data) in overloaded {
+            println!("       - {} ({:.1} tasks/day)", resource, data.avg_tasks_per_day);
+        }
+        println!("       Consider load balancing or additional staffing");
+    } else {
+        println!("     ✓ Resource workload appears balanced");
+    }
+
+    println!("\n  🔍 Variability:");
+    use pm4py::discovery::VariantAnalysis;
+    let variants = VariantAnalysis::analyze(log);
+    let variant_concentration = variants.iter().take(3).map(|v| v.count).sum::<usize>() as f64
+        / log.traces.len() as f64;
+
+    if variant_concentration < 0.5 {
+        println!("     ⚠ High process variability (top 3 variants = {:.1}%)", variant_concentration * 100.0);
+        println!("       Consider standardizing process execution");
+    } else {
+        println!("     ✓ Good process standardization (top 3 variants = {:.1}%)", variant_concentration * 100.0);
+    }
+}
+
+/// Create a realistic event log for analysis
+fn create_realistic_log() -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    let resources = vec!["Alice", "Bob", "Charlie", "Diana", "Eve"];
+
+    for i in 0..100 {
+        let mut trace = Trace::new(format!("case-{:03}", i));
+        let mut time = base_time + Duration::hours(i as i64 * 2);
+
+        // Vary start time to test temporal analysis
+        let hour_offset = (i * 7) % 24;
+        time = time + Duration::hours(hour_offset as i64);
+
+        // Submit
+        trace.add_event(
+            Event::new("Submit Request", time)
+                .with_resource(resources[i % resources.len()])
+        );
+        time = time + Duration::hours(1);
+
+        // Review (sometimes skipped for fast cases)
+        if i % 10 != 0 {
+            trace.add_event(
+                Event::new("Review Request", time)
+                    .with_resource(resources[(i + 1) % resources.len()])
+            );
+            time = time + Duration::hours((i % 5 + 1) as i64);
+        }
+
+        // Approve
+        trace.add_event(
+            Event::new("Approve Request", time)
+                .with_resource(resources[(i + 2) % resources.len()])
+        );
+        time = time + Duration::hours(1);
+
+        // Execute
+        trace.add_event(
+            Event::new("Execute Work", time)
+                .with_resource(resources[(i + 3) % resources.len()])
+        );
+        time = time + Duration::hours((i % 3 + 1) as i64);
+
+        // Complete
+        trace.add_event(
+            Event::new("Complete", time)
+                .with_resource("System")
+        );
+
+        log.add_trace(trace);
+    }
+
+    log
+}

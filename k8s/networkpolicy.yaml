@@ -1,0 +1,154 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pm4py-api-ingress
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "NetworkPolicy - allow ingress only from approved sources"
+spec:
+  # Pod selector
+  podSelector:
+    matchLabels:
+      app: pm4py-api
+      tier: api
+
+  # Policy types
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Ingress rules: Allow traffic from specific sources
+  ingress:
+    # Allow from ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Allow from kube-system (DNS, etc.)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+
+    # Allow from same namespace (pod-to-pod)
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9090
+
+    # Allow from load balancer
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+        - podSelector:
+            matchLabels:
+              component: load-balancer
+      ports:
+        - protocol: TCP
+          port: 8080
+
+    # Allow from monitoring stack
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 8080
+
+  # Egress rules: Allow traffic to specific destinations
+  egress:
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+
+    # External APIs (if needed)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+
+    # Same namespace
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 5432  # PostgreSQL (if needed)
+        - protocol: TCP
+          port: 6379  # Redis (if needed)
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pm4py-api-deny-all
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "Default deny-all policy - restrict by exception"
+spec:
+  podSelector:
+    matchLabels:
+      app: pm4py-api
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # Empty ingress/egress rules = deny all
+  ingress: []
+  egress: []
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pm4py-namespace-default-deny
+  namespace: pm4py-prod
+  labels:
+    namespace: pm4py-prod
+  annotations:
+    description: "Namespace-wide default deny policy"
+spec:
+  # Apply to all pods in namespace
+  podSelector: {}
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # No rules = deny all traffic by default
+  ingress: []
+  egress: []

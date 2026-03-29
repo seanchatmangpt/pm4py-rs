@@ -1,0 +1,713 @@
+//! End-to-End Process Mining Pipeline Example
+//!
+//! This example demonstrates a complete process mining pipeline:
+//! 1. Load event log from CSV
+//! 2. Clean and filter data
+//! 3. Discover process model
+//! 4. Check conformance
+//! 5. Analyze performance
+//! 6. Generate insights and recommendations
+//! 7. Export results
+//!
+//! This is the "production-ready" pattern for real process mining projects.
+//!
+//! Run: cargo run --example 5_end_to_end_pipeline
+
+use chrono::{Duration, Utc};
+use pm4py::{
+    conformance::{TokenReplay, ConformanceChecker},
+    discovery::{InductiveMiner, VariantAnalysis},
+    io::{CSVReader, CSVWriter, XESWriter},
+    log::{AdvancedFilter, EventLog, Event, Trace},
+    statistics::*,
+};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("╔════════════════════════════════════════════════════════════╗");
+    println!("║     End-to-End Process Mining Pipeline Example            ║");
+    println!("╚════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // ============================================================================
+    // PHASE 1: DATA LOADING
+    // ============================================================================
+    println!("📊 PHASE 1: Loading event data");
+    println!("{}", "─".repeat(60));
+
+    let log = load_or_create_event_log()?;
+    println!("✓ Loaded {} traces with {} total events", log.traces.len(), log.total_events());
+    println!();
+
+    // ============================================================================
+    // PHASE 2: DATA QUALITY ASSESSMENT
+    // ============================================================================
+    println!("🔍 PHASE 2: Data quality assessment");
+    println!("{}", "─".repeat(60));
+
+    let quality_report = assess_data_quality(&log);
+    print_data_quality_report(&quality_report);
+    println!();
+
+    // ============================================================================
+    // PHASE 3: DATA CLEANING AND FILTERING
+    // ============================================================================
+    println!("🧹 PHASE 3: Data cleaning and filtering");
+    println!("{}", "─".repeat(60));
+
+    let filtered_log = clean_and_filter_data(&log, &quality_report)?;
+    println!("✓ Filtered to {} traces ({:.1}% retained)",
+        filtered_log.traces.len(),
+        (filtered_log.traces.len() as f64 / log.traces.len() as f64) * 100.0
+    );
+    println!();
+
+    // ============================================================================
+    // PHASE 4: PROCESS DISCOVERY
+    // ============================================================================
+    println!("🔧 PHASE 4: Process discovery");
+    println!("{}", "─".repeat(60));
+
+    let miner = InductiveMiner::new();
+    let process_model = miner.discover(&filtered_log);
+
+    println!("✓ Discovered process model:");
+    println!("  - Places: {}", process_model.places.len());
+    println!("  - Transitions: {}", process_model.transitions.len());
+    println!("  - Arcs: {}", process_model.arcs.len());
+    println!();
+
+    // ============================================================================
+    // PHASE 5: CONFORMANCE CHECKING
+    // ============================================================================
+    println!("✓ PHASE 5: Conformance checking");
+    println!("{}", "─".repeat(60));
+
+    let checker = TokenReplay::new();
+    let conformance_result = checker.check(&filtered_log, &process_model);
+
+    println!("✓ Conformance results:");
+    println!("  - Overall fitness: {:.2}%", conformance_result.fitness * 100.0);
+    println!("  - Fitting traces: {}/{} ({:.1}%)",
+        conformance_result.fitting_traces,
+        filtered_log.traces.len(),
+        (conformance_result.fitting_traces as f64 / filtered_log.traces.len() as f64) * 100.0
+    );
+    println!("  - Deviating traces: {}",
+        filtered_log.traces.len() - conformance_result.fitting_traces
+    );
+    println!();
+
+    // ============================================================================
+    // PHASE 6: PERFORMANCE ANALYSIS
+    // ============================================================================
+    println!("⚡ PHASE 6: Performance analysis");
+    println!("{}", "─".repeat(60));
+
+    let perf_metrics = analyze_performance(&filtered_log);
+
+    println!("✓ Performance metrics:");
+    println!("  - Avg case duration: {:.2} hours", perf_metrics.avg_case_duration_hours);
+    println!("  - Median case duration: {:.2} hours", perf_metrics.median_case_duration_hours);
+    println!("  - 90th percentile: {:.2} hours", perf_metrics.p90_case_duration_hours);
+    println!("  - Bottleneck activity: {} ({:.2}s avg)",
+        perf_metrics.bottleneck_activity,
+        perf_metrics.bottleneck_avg_duration_secs
+    );
+    println!();
+
+    // ============================================================================
+    // PHASE 7: VARIANTS ANALYSIS
+    // ============================================================================
+    println!("📈 PHASE 7: Variants analysis");
+    println!("{}", "─".repeat(60));
+
+    let variants = VariantAnalysis::analyze(&filtered_log);
+
+    println!("✓ Found {} unique process variants", variants.len());
+    println!("\n  Top 5 variants:");
+    for (i, variant) in variants.iter().take(5).enumerate() {
+        let pct = (variant.count as f64 / filtered_log.traces.len() as f64) * 100.0;
+        println!("    {}. [{} cases, {:.1}%] {}",
+            i + 1,
+            variant.count,
+            pct,
+            variant.signature
+        );
+    }
+    println!();
+
+    // ============================================================================
+    // PHASE 8: ORGANIZATIONAL ANALYSIS
+    // ============================================================================
+    println!("👥 PHASE 8: Organizational analysis");
+    println!("{}", "─".repeat(60));
+
+    let org_metrics = analyze_organizational_metrics(&filtered_log);
+
+    println!("✓ Organizational metrics:");
+    println!("  - Unique resources: {}", org_metrics.unique_resources);
+    println!("  - Avg activities per resource: {:.1}", org_metrics.avg_activities_per_resource);
+    println!("  - Most active resource: {} ({} tasks)",
+        org_metrics.most_active_resource,
+        org_metrics.most_active_task_count
+    );
+    println!();
+
+    // ============================================================================
+    // PHASE 9: INSIGHTS AND RECOMMENDATIONS
+    // ============================================================================
+    println!("💡 PHASE 9: Insights and recommendations");
+    println!("{}", "─".repeat(60));
+
+    let insights = generate_insights(
+        &quality_report,
+        &conformance_result,
+        &perf_metrics,
+        &variants,
+        &org_metrics,
+    );
+
+    print_insights_and_recommendations(&insights);
+    println!();
+
+    // ============================================================================
+    // PHASE 10: EXPORT RESULTS
+    // ============================================================================
+    println!("💾 PHASE 10: Exporting results");
+    println!("{}", "─".repeat(60));
+
+    export_results(&filtered_log, &process_model, &insights)?;
+    println!();
+
+    // ============================================================================
+    // FINAL SUMMARY
+    // ============================================================================
+    println!("╔════════════════════════════════════════════════════════════╗");
+    println!("║              Pipeline Execution Summary                    ║");
+    println!("╚════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("  ✓ Process mining pipeline completed successfully");
+    println!("  ✓ All results exported to examples/data/output/");
+    println!();
+    println!("  Key findings:");
+    println!("    - Process fitness: {:.1}%", conformance_result.fitness * 100.0);
+    println!("    - Main variant covers {:.1}% of cases", variants[0].count as f64 / filtered_log.traces.len() as f64 * 100.0);
+    println!("    - {} improvement opportunities identified", insights.improvement_count);
+    println!();
+
+    Ok(())
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct DataQualityReport {
+    total_cases: usize,
+    total_events: usize,
+    empty_cases: usize,
+    cases_without_start: usize,
+    cases_without_end: usize,
+    duplicate_events: usize,
+    missing_timestamps: usize,
+    quality_score: f64,
+}
+
+struct PerformanceMetrics {
+    avg_case_duration_hours: f64,
+    median_case_duration_hours: f64,
+    p90_case_duration_hours: f64,
+    bottleneck_activity: String,
+    bottleneck_avg_duration_secs: f64,
+}
+
+struct OrganizationalMetrics {
+    unique_resources: usize,
+    avg_activities_per_resource: f64,
+    most_active_resource: String,
+    most_active_task_count: usize,
+}
+
+struct ProcessInsights {
+    overall_health: String,
+    top_issues: Vec<String>,
+    improvement_count: usize,
+    recommendations: Vec<String>,
+}
+
+// ============================================================================
+// PHASE 1: DATA LOADING
+// ============================================================================
+
+fn load_or_create_event_log() -> Result<EventLog, Box<dyn std::error::Error>> {
+    let csv_path = Path::new("examples/data/pipeline_log.csv");
+
+    // Try to load from CSV first
+    if csv_path.exists() {
+        println!("  Loading from CSV file...");
+        let reader = CSVReader::new();
+        match reader.read(csv_path) {
+            Ok(log) => return Ok(log),
+            Err(e) => {
+                println!("  ⚠ Failed to load CSV: {}", e);
+                println!("  Falling back to synthetic data generation...");
+            }
+        }
+    }
+
+    // Generate synthetic data
+    println!("  Generating synthetic event log...");
+    Ok(generate_pipeline_log())
+}
+
+fn generate_pipeline_log() -> EventLog {
+    let mut log = EventLog::new();
+    let base_time = Utc::now();
+
+    let resources = vec!["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank"];
+
+    for i in 0..200 {
+        let mut trace = Trace::new(format!("case-{:04}", i));
+        let mut time = base_time + Duration::seconds(i as i64 * 3600);
+
+        // Vary process flow to create realistic variants
+        let variant_type = i % 10;
+
+        // Start
+        trace.add_event(Event::new("Start", time).with_resource("System"));
+        time = time + Duration::minutes(15);
+
+        // Submit
+        trace.add_event(
+            Event::new("Submit Request", time)
+                .with_resource(resources[i % resources.len()])
+        );
+        time = time + Duration::hours(1);
+
+        // Review (sometimes skipped)
+        if variant_type != 1 {
+            trace.add_event(
+                Event::new("Review Request", time)
+                    .with_resource(resources[(i + 1) % resources.len()])
+            );
+            time = time + Duration::hours((i % 4 + 2) as i64);
+        }
+
+        // Additional info (20% of cases)
+        if variant_type == 2 {
+            trace.add_event(
+                Event::new("Request Additional Info", time)
+                    .with_resource(resources[(i + 1) % resources.len()])
+            );
+            time = time + Duration::hours(24);
+            trace.add_event(
+                Event::new("Receive Additional Info", time)
+                    .with_resource("Customer")
+            );
+            time = time + Duration::hours(2);
+        }
+
+        // Approve
+        if variant_type != 3 {
+            trace.add_event(
+                Event::new("Approve Request", time)
+                    .with_resource(resources[(i + 2) % resources.len()])
+            );
+            time = time + Duration::hours(2);
+        } else {
+            trace.add_event(
+                Event::new("Reject Request", time)
+                    .with_resource(resources[(i + 2) % resources.len()])
+            );
+            time = time + Duration::hours(1);
+        }
+
+        // Execute (only if approved)
+        if variant_type != 3 {
+            trace.add_event(
+                Event::new("Execute Work", time)
+                    .with_resource(resources[(i + 3) % resources.len()])
+            );
+            time = time + Duration::hours((i % 6 + 4) as i64);
+
+            // Quality check (sometimes skipped)
+            if variant_type != 4 {
+                trace.add_event(
+                    Event::new("Quality Check", time)
+                        .with_resource(resources[(i + 4) % resources.len()])
+                );
+                time = time + Duration::hours(1);
+
+                // Rework if quality check fails (10% of cases)
+                if variant_type == 5 {
+                    trace.add_event(
+                        Event::new("Rework", time)
+                            .with_resource(resources[(i + 3) % resources.len()])
+                    );
+                    time = time + Duration::hours(4);
+                    trace.add_event(
+                        Event::new("Quality Check", time)
+                            .with_resource(resources[(i + 4) % resources.len()])
+                    );
+                    time = time + Duration::hours(1);
+                }
+            }
+
+            // Complete
+            trace.add_event(Event::new("Complete", time).with_resource("System"));
+        } else {
+            trace.add_event(Event::new("Close Case", time).with_resource("System"));
+        }
+
+        log.add_trace(trace);
+    }
+
+    log
+}
+
+// ============================================================================
+// PHASE 2: DATA QUALITY
+// ============================================================================
+
+fn assess_data_quality(log: &EventLog) -> DataQualityReport {
+    let mut empty_cases = 0;
+    let mut cases_without_start = 0;
+    let mut cases_without_end = 0;
+    let mut missing_timestamps = 0;
+
+    for trace in &log.traces {
+        if trace.events.is_empty() {
+            empty_cases += 1;
+        } else {
+            let has_start = trace.events.iter().any(|e| e.activity == "Start");
+            let has_end = trace.events.iter().any(|e| e.activity == "Complete" || e.activity == "Close Case");
+
+            if !has_start {
+                cases_without_start += 1;
+            }
+            if !has_end {
+                cases_without_end += 1;
+            }
+        }
+
+        for event in &trace.events {
+            if event.timestamp.timestamp() == 0 {
+                missing_timestamps += 1;
+            }
+        }
+    }
+
+    let quality_score = calculate_quality_score(
+        log.traces.len(),
+        empty_cases,
+        cases_without_start,
+        cases_without_end,
+        missing_timestamps,
+    );
+
+    DataQualityReport {
+        total_cases: log.traces.len(),
+        total_events: log.total_events(),
+        empty_cases,
+        cases_without_start,
+        cases_without_end,
+        duplicate_events: 0,  // Would need more complex detection
+        missing_timestamps,
+        quality_score,
+    }
+}
+
+fn calculate_quality_score(
+    total: usize,
+    empty: usize,
+    no_start: usize,
+    no_end: usize,
+    missing_ts: usize,
+) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    let deductions = (empty * 10 + no_start * 2 + no_end * 2 + missing_ts) as f64;
+    let max_score = (total * 10) as f64;
+    ((max_score - deductions) / max_score * 100.0).max(0.0)
+}
+
+fn print_data_quality_report(report: &DataQualityReport) {
+    println!("  Total cases: {}", report.total_cases);
+    println!("  Total events: {}", report.total_events);
+    println!("  Empty cases: {}", report.empty_cases);
+    println!("  Cases without start: {}", report.cases_without_start);
+    println!("  Cases without end: {}", report.cases_without_end);
+    println!("  Missing timestamps: {}", report.missing_timestamps);
+    println!();
+    println!("  📊 Overall data quality score: {:.1}/100", report.quality_score);
+
+    let quality_level = if report.quality_score >= 90.0 {
+        "✅ Excellent"
+    } else if report.quality_score >= 75.0 {
+        "🟡 Good"
+    } else if report.quality_score >= 60.0 {
+        "🟠 Fair"
+    } else {
+        "🔴 Poor"
+    };
+    println!("  Quality level: {}", quality_level);
+}
+
+// ============================================================================
+// PHASE 3: DATA CLEANING
+// ============================================================================
+
+fn clean_and_filter_data(
+    log: &EventLog,
+    quality: &DataQualityReport,
+) -> Result<EventLog, Box<dyn std::error::Error>> {
+    println!("  Removing empty cases...");
+    let mut filtered = log.clone();
+
+    // Remove empty traces
+    filtered.traces.retain(|t| !t.events.is_empty());
+
+    // Filter to top variants (80% coverage)
+    println!("  Filtering to top 80% of variants...");
+    filtered = filtered.filter_variants_top_k(0.8);
+
+    // Remove outliers (extremely long cases)
+    println!("  Removing case duration outliers...");
+    filtered = filtered.filter_case_size(3, 100);
+
+    Ok(filtered)
+}
+
+// ============================================================================
+// PHASE 6: PERFORMANCE ANALYSIS
+// ============================================================================
+
+fn analyze_performance(log: &EventLog) -> PerformanceMetrics {
+    let mut durations = Vec::new();
+
+    for trace in &log.traces {
+        if let (Some(first), Some(last)) = (trace.events.first(), trace.events.last()) {
+            let duration = last.timestamp.signed_duration_since(first.timestamp);
+            durations.push(duration.num_hours() as f64);
+        }
+    }
+
+    durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let avg = durations.iter().sum::<f64>() / durations.len() as f64;
+    let median = if durations.len() % 2 == 0 {
+        (durations[durations.len() / 2 - 1] + durations[durations.len() / 2]) / 2.0
+    } else {
+        durations[durations.len() / 2]
+    };
+    let p90 = durations[(durations.len() as f64 * 0.9) as usize];
+
+    // Simple bottleneck detection (most frequent activity)
+    let mut activity_freq = std::collections::HashMap::new();
+    for trace in &log.traces {
+        for event in &trace.events {
+            *activity_freq.entry(event.activity.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let bottleneck = activity_freq
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(activity, _)| activity)
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    PerformanceMetrics {
+        avg_case_duration_hours: avg,
+        median_case_duration_hours: median,
+        p90_case_duration_hours: p90,
+        bottleneck_activity: bottleneck,
+        bottleneck_avg_duration_secs: 0.0,  // Would need more detailed analysis
+    }
+}
+
+// ============================================================================
+// PHASE 8: ORGANIZATIONAL ANALYSIS
+// ============================================================================
+
+fn analyze_organizational_metrics(log: &EventLog) -> OrganizationalMetrics {
+    let mut resource_tasks: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut resource_activities: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+
+    for trace in &log.traces {
+        for event in &trace.events {
+            if let Some(ref resource) = event.resource {
+                *resource_tasks.entry(resource.clone()).or_insert(0) += 1;
+                resource_activities
+                    .entry(resource.clone())
+                    .or_insert_with(std::collections::HashSet::new)
+                    .insert(event.activity.clone());
+            }
+        }
+    }
+
+    let unique_resources = resource_tasks.len();
+    let avg_activities_per_resource = if unique_resources > 0 {
+        resource_activities.values().map(|s| s.len()).sum::<usize>() as f64 / unique_resources as f64
+    } else {
+        0.0
+    };
+
+    let (most_active_resource, most_active_task_count) = resource_tasks
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .unwrap_or_else(|| ("Unknown".to_string(), 0));
+
+    OrganizationalMetrics {
+        unique_resources,
+        avg_activities_per_resource,
+        most_active_resource,
+        most_active_task_count,
+    }
+}
+
+// ============================================================================
+// PHASE 9: INSIGHTS GENERATION
+// ============================================================================
+
+fn generate_insights(
+    quality: &DataQualityReport,
+    conformance: &<TokenReplay as ConformanceChecker>::Result,
+    perf: &PerformanceMetrics,
+    variants: &[pm4py::discovery::Variant],
+    org: &OrganizationalMetrics,
+) -> ProcessInsights {
+    let mut top_issues = Vec::new();
+    let mut recommendations = Vec::new();
+
+    // Data quality issues
+    if quality.quality_score < 80.0 {
+        top_issues.push(format!(
+            "Data quality score is {:.1}%. Improve data collection.",
+            quality.quality_score
+        ));
+        recommendations.push("Implement data validation at source".to_string());
+    }
+
+    // Conformance issues
+    if conformance.fitness < 0.85 {
+        top_issues.push(format!(
+            "Low model fitness ({:.1}%). Process model doesn't match reality.",
+            conformance.fitness * 100.0
+        ));
+        recommendations.push("Update process model to reflect actual practices".to_string());
+    }
+
+    // Performance issues
+    if perf.avg_case_duration_hours > 48.0 {
+        top_issues.push(format!(
+            "Long average case duration ({:.1} hours). Investigate bottlenecks.",
+            perf.avg_case_duration_hours
+        ));
+        recommendations.push("Analyze and optimize {} activity".to_string(), perf.bottleneck_activity);
+    }
+
+    // Process variability
+    let variant_concentration = variants.iter().take(3).map(|v| v.count).sum::<usize>() as f64
+        / variants.iter().map(|v| v.count).sum::<usize>() as f64;
+
+    if variant_concentration < 0.5 {
+        top_issues.push("High process variability. Standardization needed.".to_string());
+        recommendations.push("Standardize process execution paths".to_string());
+    }
+
+    let overall_health = if quality.quality_score >= 90.0 && conformance.fitness >= 0.90 {
+        "🟢 Excellent".to_string()
+    } else if quality.quality_score >= 75.0 && conformance.fitness >= 0.80 {
+        "🟡 Good".to_string()
+    } else if quality.quality_score >= 60.0 && conformance.fitness >= 0.70 {
+        "🟠 Fair".to_string()
+    } else {
+        "🔴 Needs Improvement".to_string()
+    };
+
+    ProcessInsights {
+        overall_health,
+        top_issues,
+        improvement_count: recommendations.len(),
+        recommendations,
+    }
+}
+
+fn print_insights_and_recommendations(insights: &ProcessInsights) {
+    println!("  Overall Process Health: {}", insights.overall_health);
+    println!();
+
+    if !insights.top_issues.is_empty() {
+        println!("  🔴 Top Issues:");
+        for (i, issue) in insights.top_issues.iter().enumerate() {
+            println!("    {}. {}", i + 1, issue);
+        }
+        println!();
+    }
+
+    if !insights.recommendations.is_empty() {
+        println!("  💡 Recommendations:");
+        for (i, rec) in insights.recommendations.iter().enumerate() {
+            println!("    {}. {}", i + 1, rec);
+        }
+    }
+}
+
+// ============================================================================
+// PHASE 10: EXPORT RESULTS
+// ============================================================================
+
+fn export_results(
+    log: &EventLog,
+    model: &pm4py::models::PetriNet,
+    insights: &ProcessInsights,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    // Create output directory
+    let output_dir = Path::new("examples/data/output");
+    fs::create_dir_all(output_dir)?;
+
+    // Export filtered log to XES
+    println!("  Exporting filtered log to XES...");
+    let xes_writer = XESWriter::new();
+    xes_writer.write(log, &output_dir.join("filtered_log.xes"))?;
+    println!("    ✓ examples/data/output/filtered_log.xes");
+
+    // Export filtered log to CSV
+    println!("  Exporting filtered log to CSV...");
+    let csv_writer = CSVWriter::new();
+    csv_writer.write(log, &output_dir.join("filtered_log.csv"))?;
+    println!("    ✓ examples/data/output/filtered_log.csv");
+
+    // Export insights to text file
+    println!("  Exporting insights report...");
+    let report_path = output_dir.join("insights_report.txt");
+    let mut report = fs::File::create(&report_path)?;
+    use std::io::Write;
+
+    writeln!(report, "Process Mining Insights Report")?;
+    writeln!(report, "================================")?;
+    writeln!(report)?;
+    writeln!(report, "Overall Health: {}", insights.overall_health)?;
+    writeln!(report)?;
+    writeln!(report, "Top Issues:")?;
+    for (i, issue) in insights.top_issues.iter().enumerate() {
+        writeln!(report, "  {}. {}", i + 1, issue)?;
+    }
+    writeln!(report)?;
+    writeln!(report, "Recommendations:")?;
+    for (i, rec) in insights.recommendations.iter().enumerate() {
+        writeln!(report, "  {}. {}", i + 1, rec)?;
+    }
+
+    println!("    ✓ examples/data/output/insights_report.txt");
+
+    println!("\n  ✓ All exports completed successfully");
+
+    Ok(())
+}

@@ -1,0 +1,140 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pm4py-api-hpa
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+  annotations:
+    description: "Horizontal Pod Autoscaler - scales based on CPU and memory"
+spec:
+  # Target deployment
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pm4py-api
+
+  # Replica bounds
+  minReplicas: 3
+  maxReplicas: 10
+
+  # Scaling policies
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+        - type: Pods
+          value: 1
+          periodSeconds: 30
+      selectPolicy: Min  # Select policy that scales down least
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+      selectPolicy: Max  # Select policy that scales up most
+
+  # Metrics for scaling decisions
+  metrics:
+    # CPU-based scaling
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80  # Scale up when CPU > 80%
+      containerResource:
+        name: pm4py-api
+        target:
+          type: AverageValue
+          averageValue: 1600m  # 80% of 2000m limit
+
+    # Memory-based scaling
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 85  # Scale up when memory > 85%
+      containerResource:
+        name: pm4py-api
+        target:
+          type: AverageValue
+          averageValue: 1740Mi  # 85% of 2048Mi limit
+
+    # Request latency-based scaling (requires custom metrics)
+    - type: Pods
+      pods:
+        metric:
+          name: http_request_duration_seconds
+          selector:
+            matchLabels:
+              endpoint: "/api/discovery"
+        target:
+          type: AverageValue
+          averageValue: "1"  # Scale when avg latency > 1s
+
+    # Custom metric: request rate
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+          selector:
+            matchLabels:
+              handler: "discovery"
+        target:
+          type: AverageValue
+          averageValue: "100"  # Scale when >100 req/s per pod
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pm4py-api-aggressive-hpa
+  namespace: pm4py-prod
+  labels:
+    app: pm4py-api
+    variant: aggressive
+  annotations:
+    description: "Aggressive HPA for burst traffic - scales faster"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pm4py-api
+
+  minReplicas: 5
+  maxReplicas: 15
+
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 10
+        - type: Pods
+          value: 3
+          periodSeconds: 10
+      selectPolicy: Max
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Lower threshold for aggressive scaling
